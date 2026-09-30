@@ -1,14 +1,58 @@
+/* Tailwind CSS Direktifleri (NPM Kurulumu İçin) */
 @import "tailwindcss";
-@import "@fortawesome/fontawesome-free/css/all.min.css";
 
-@font-face {
-  font-family: "Roboto Slab";
-  src: url(./assets/fonts/Roboto_Slab/RobotoSlab-VariableFont_wght.ttf);
-  font-weight: 100 900;
-  font-style: normal;
-  font-display: swap;
+/* Eğer Tailwind CSS v3 kullanıyorsan yukarıdaki @import yerine şunları kullanabilirsin:
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+*/
+
+/* Mobil etkileşim iyileştirmesi */
+* {
+  -webkit-tap-highlight-color: transparent;
 }
 
-@theme {
-  --font-roboto: "Roboto Slab", serif;
+/* Yumuşak tema ve durum geçişleri */
+body,
+aside {
+  transition:
+    background-color 0.25s ease,
+    color 0.25s ease;
+}
+
+/* Ayarlar Paneli Kayma Efekti (Drawer) */
+.settings-panel {
+  transform: translateX(-100%);
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.settings-panel.open {
+  transform: translateX(0);
+}
+
+/* Karartma Katmanı (Overlay) */
+.overlay {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Tabular Rakamlar: Sayacın saniyeler değiştikçe titremesini önler */
+.timer-display {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+/* Buton Tıklama Efekti */
+.btn-click {
+  transition:
+    transform 0.1s ease,
+    background-color 0.2s ease,
+    opacity 0.2s ease;
+}
+.btn-click:active {
+  transform: scale(0.94);
 }

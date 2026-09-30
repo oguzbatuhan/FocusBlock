@@ -3,4 +3,8 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [tailwindcss()],
+  server: {
+    host: true, // Ağ üzerindeki diğer cihazların erişimine izin verir
+    port: 5173, // Dilersen portu buradan sabitleyebilirsin
+  },
 });

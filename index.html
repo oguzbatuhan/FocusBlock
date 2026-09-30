@@ -4,7 +4,374 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Pomodoro Timer</title>
-    <script type="module" src="/src/main.js"></script>
+
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Derlenmiş CSS (Vite kullanıyorsan src/style.css, Vanilla CLI kullanıyorsan dist/style.css) -->
+    <link rel="stylesheet" href="./src/style.css" />
   </head>
-  <body class="font-roboto font-bold text-2xl"></body>
+  <body class="min-h-screen font-sans antialiased overflow-x-hidden">
+    <!-- UYGULAMA KAPSAYICISI -->
+    <div id="app" class="min-h-screen flex flex-col justify-between">
+      <!-- 1. ÜST BAR (HEADER) -->
+      <header
+        class="w-full max-w-4xl mx-auto px-6 py-5 flex items-center justify-between"
+      >
+        <button
+          id="settingsBtn"
+          class="btn-click p-3 rounded-2xl bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
+          aria-label="Ayarlar"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="w-6 h-6"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+            />
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+            />
+          </svg>
+        </button>
+
+        <h1
+          class="text-lg font-bold tracking-tight opacity-80 select-none"
+          data-i18n="appTitle"
+        >
+          Pomodoro
+        </h1>
+
+        <!-- Dengeleyici boşluk (flex hiza için) -->
+        <div class="w-12"></div>
+      </header>
+
+      <!-- 2. ANA İÇERİK (SAYAÇ VE KONTROLLER) -->
+      <main
+        class="flex-1 flex flex-col items-center justify-center px-6 py-8 max-w-xl w-full mx-auto text-center"
+      >
+        <!-- Mod Rozeti (Çalışma / Mola / Tamamlandı) -->
+        <div
+          id="modeBadge"
+          class="mb-6 px-5 py-2 rounded-full text-xs font-bold tracking-widest uppercase transition-all duration-300"
+        >
+          <span data-i18n="work">Çalışma</span>
+        </div>
+
+        <!-- Sayaç Ekranı -->
+        <div
+          id="timerDisplay"
+          class="timer-display text-8xl sm:text-9xl font-extrabold tracking-tight mb-6 select-none"
+        >
+          25:00
+        </div>
+
+        <!-- Set Bilgisi Göstergesi -->
+        <div
+          class="text-xs font-semibold uppercase tracking-wider opacity-60 mb-10 bg-black/5 dark:bg-white/10 px-4 py-2 rounded-full"
+        >
+          <span data-i18n="set">Set</span>: <span id="currentSet">1</span> /
+          <span id="totalSets">4</span>
+        </div>
+
+        <!-- Ana Kontrol Butonları -->
+        <div class="flex items-center gap-6 mb-10">
+          <!-- Sıfırla Butonu -->
+          <button
+            id="resetBtn"
+            class="btn-click w-14 h-14 rounded-2xl flex items-center justify-center bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20"
+            title="Sıfırla"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="w-6 h-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+          </button>
+
+          <!-- Başlat / Duraklat Butonu -->
+          <button
+            id="startPauseBtn"
+            class="btn-click w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg text-white font-semibold transition-transform"
+          >
+            <svg
+              id="playIcon"
+              xmlns="http://www.w3.org/2000/svg"
+              class="w-9 h-9 ml-1"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            <svg
+              id="pauseIcon"
+              xmlns="http://www.w3.org/2000/svg"
+              class="w-9 h-9 hidden"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+            </svg>
+          </button>
+
+          <!-- Fazı Atla Butonu -->
+          <button
+            id="skipBtn"
+            class="btn-click w-14 h-14 rounded-2xl flex items-center justify-center bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20"
+            title="Atla"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="w-6 h-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M13 5l7 7-7 7M5 5l7 7-7 7"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Hızlı Set Arttırma / Azaltma -->
+        <div class="flex items-center gap-3">
+          <button
+            id="removeSetBtn"
+            class="btn-click px-4 py-2 rounded-xl text-xs font-bold bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10"
+            data-i18n="removeSet"
+          >
+            − Set
+          </button>
+          <button
+            id="addSetBtn"
+            class="btn-click px-4 py-2 rounded-xl text-xs font-bold bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10"
+            data-i18n="addSet"
+          >
+            + Set
+          </button>
+        </div>
+      </main>
+
+      <!-- Alt Bilgi (Footer) -->
+      <footer class="py-4 text-center text-xs opacity-40">
+        Pomodoro Web App &bull; Clean Architecture
+      </footer>
+    </div>
+
+    <!-- 3. KARARTMA KATMANI (OVERLAY) -->
+    <div id="overlay" class="overlay fixed inset-0 bg-black/40 z-40"></div>
+
+    <!-- 4. MODERN AYARLAR PANELİ (SIDE DRAWER) -->
+    <aside
+      id="settingsPanel"
+      class="settings-panel fixed inset-y-0 left-0 w-full max-w-sm z-50 flex flex-col border-r border-black/10 dark:border-white/10 shadow-2xl"
+    >
+      <!-- Panel Başlığı -->
+      <div
+        class="flex items-center justify-between px-6 py-5 border-b border-black/10 dark:border-white/10"
+      >
+        <h2 class="text-base font-bold tracking-tight" data-i18n="settings">
+          Ayarlar
+        </h2>
+        <button
+          id="closeSettingsBtn"
+          class="btn-click p-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="w-5 h-5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M6 18L18 6M6 6l12 12"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Ayar Seçenekleri İçeriği -->
+      <div class="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+        <!-- Dil Ayarı Kartı -->
+        <div class="p-4 rounded-2xl bg-black/5 dark:bg-white/5 space-y-3">
+          <label
+            class="block text-xs font-bold uppercase tracking-wider opacity-60"
+            data-i18n="language"
+            >Dil</label
+          >
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              data-lang="tr"
+              class="lang-btn btn-click py-2.5 rounded-xl border-2 font-semibold text-xs"
+            >
+              Türkçe
+            </button>
+            <button
+              data-lang="en"
+              class="lang-btn btn-click py-2.5 rounded-xl border-2 font-semibold text-xs"
+            >
+              English
+            </button>
+          </div>
+        </div>
+
+        <!-- Tema Ayarı Kartı -->
+        <div class="p-4 rounded-2xl bg-black/5 dark:bg-white/5 space-y-3">
+          <label
+            class="block text-xs font-bold uppercase tracking-wider opacity-60"
+            data-i18n="theme"
+            >Tema</label
+          >
+          <div class="grid grid-cols-2 gap-2" id="themeButtons">
+            <button
+              data-theme="dark"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span
+                class="w-3 h-3 rounded-full bg-zinc-900 border border-white/20"
+              ></span>
+              Dark
+            </button>
+            <button
+              data-theme="light"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span
+                class="w-3 h-3 rounded-full bg-stone-200 border border-black/20"
+              ></span>
+              Light
+            </button>
+            <button
+              data-theme="forest"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span class="w-3 h-3 rounded-full bg-emerald-800"></span> Forest
+            </button>
+            <button
+              data-theme="ocean"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span class="w-3 h-3 rounded-full bg-sky-800"></span> Ocean
+            </button>
+            <button
+              data-theme="sunset"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span class="w-3 h-3 rounded-full bg-orange-800"></span> Sunset
+            </button>
+            <button
+              data-theme="lavender"
+              class="theme-btn btn-click py-2.5 px-3 rounded-xl border-2 font-medium text-xs flex items-center gap-2"
+            >
+              <span class="w-3 h-3 rounded-full bg-purple-800"></span> Lavender
+            </button>
+          </div>
+        </div>
+
+        <!-- Süre Ayarları Kartı -->
+        <div class="p-4 rounded-2xl bg-black/5 dark:bg-white/5 space-y-4">
+          <div>
+            <label
+              class="block text-xs font-bold uppercase tracking-wider opacity-60 mb-2"
+              data-i18n="workDuration"
+              >Çalışma Süresi (dk)</label
+            >
+            <input
+              type="number"
+              id="workInput"
+              min="1"
+              max="120"
+              class="w-full px-4 py-2.5 rounded-xl border border-black/10 dark:border-white/10 bg-transparent focus:outline-none focus:ring-2 focus:ring-current/30 text-sm font-semibold"
+            />
+          </div>
+          <div>
+            <label
+              class="block text-xs font-bold uppercase tracking-wider opacity-60 mb-2"
+              data-i18n="breakDuration"
+              >Mola Süresi (dk)</label
+            >
+            <input
+              type="number"
+              id="breakInput"
+              min="1"
+              max="60"
+              class="w-full px-4 py-2.5 rounded-xl border border-black/10 dark:border-white/10 bg-transparent focus:outline-none focus:ring-2 focus:ring-current/30 text-sm font-semibold"
+            />
+          </div>
+          <div>
+            <label
+              class="block text-xs font-bold uppercase tracking-wider opacity-60 mb-2"
+              data-i18n="setsCount"
+              >Set Sayısı</label
+            >
+            <input
+              type="number"
+              id="setsInput"
+              min="1"
+              max="20"
+              class="w-full px-4 py-2.5 rounded-xl border border-black/10 dark:border-white/10 bg-transparent focus:outline-none focus:ring-2 focus:ring-current/30 text-sm font-semibold"
+            />
+          </div>
+        </div>
+
+        <!-- 5. LOCALSTORAGE TEMİZLEME BUTONU -->
+        <div class="pt-2">
+          <button
+            id="clearStorageBtn"
+            class="btn-click w-full py-3 px-4 rounded-2xl bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
+            </svg>
+            <span data-i18n="clearData">Verileri Sıfırla</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- JS Modülü (ES Module şeklinde yüklenir) -->
+    <script type="module" src="./src/main.js"></script>
+  </body>
 </html>
