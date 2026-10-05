@@ -1,58 +1,67 @@
-/* Tailwind CSS Direktifleri (NPM Kurulumu İçin) */
 @import "tailwindcss";
 
-/* Eğer Tailwind CSS v3 kullanıyorsan yukarıdaki @import yerine şunları kullanabilirsin:
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-*/
-
-/* Mobil etkileşim iyileştirmesi */
+/* Dokunmatik Hassasiyet ve Seçim Engelleme */
 * {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Yumuşak tema ve durum geçişleri */
+/* Yumuşak Renk Geçişi */
 body,
 aside {
   transition:
-    background-color 0.25s ease,
-    color 0.25s ease;
+    background-color 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Ayarlar Paneli Kayma Efekti (Drawer) */
+/* Ayarlar Çekmecesi Animasyonu */
 .settings-panel {
-  transform: translateX(-100%);
-  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transform: translateX(110%);
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .settings-panel.open {
   transform: translateX(0);
 }
 
-/* Karartma Katmanı (Overlay) */
+/* Karartma Katmanı */
 .overlay {
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s ease;
+  transition: opacity 0.3s ease;
 }
 .overlay.open {
   opacity: 1;
   pointer-events: auto;
 }
 
-/* Tabular Rakamlar: Sayacın saniyeler değiştikçe titremesini önler */
-.timer-display {
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
+/* Tab Çizgisi */
+.tab-btn.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: currentColor;
+  border-radius: 9999px;
 }
 
-/* Buton Tıklama Efekti */
-.btn-click {
-  transition:
-    transform 0.1s ease,
-    background-color 0.2s ease,
-    opacity 0.2s ease;
+/* Sayı İnputlarındaki Standart Okları Kaldır */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
-.btn-click:active {
-  transform: scale(0.94);
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Rakam Titremesini Önleme */
+.timer-display {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+/* Performans Optimizasyonu */
+.btn-hover {
+  will-change: transform;
 }
