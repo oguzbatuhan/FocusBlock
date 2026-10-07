@@ -11,6 +11,8 @@
 const STORAGE_KEY = "focusblock-v2";
 const OLD_KEY = "focusblock-pro-state";
 const PREV_KEY = "focusblock-v2-prev";
+const AUTO_KEY = "focusblock-v2-auto";
+const NAG_KEY = "focusblock-v2-nag";
 
 const PALETTE = [
   { id: "indigo", hex: "#6366f1" },
@@ -256,6 +258,8 @@ function defaultState() {
       sound: true,
       volume: 70,
       notify: false,
+      vibrate: true,
+      wakeLock: false,
       dailyGoal: 120,
       lastBackup: null,
     },
@@ -265,6 +269,11 @@ function defaultState() {
     history: [],
   };
 }
+
+const validEnd = (s) =>
+  Number.isFinite(Number(s && s.endAt)) && Number(s.endAt) > 0
+    ? Number(s.endAt)
+    : null;
 
 function normalizeState(raw) {
   const d = defaultState();
@@ -281,6 +290,11 @@ function normalizeState(raw) {
     15,
     720,
   );
+  out.settings.notify = !!out.settings.notify;
+  out.settings.autoStart = !!out.settings.autoStart;
+  out.settings.sound = out.settings.sound !== false;
+  out.settings.vibrate = out.settings.vibrate !== false;
+  out.settings.wakeLock = !!out.settings.wakeLock;
   const vol = parseInt(out.settings.volume);
   out.settings.volume = clamp(isNaN(vol) ? 70 : vol, 0, 100);
   out.settings.lastBackup =
@@ -289,23 +303,27 @@ function normalizeState(raw) {
       : null;
 
   if (Array.isArray(raw.types) && raw.types.length) {
-    out.types = raw.types.map((t) => ({
-      id: String(t.id || uid()),
-      name: String(t.name || "Blok").slice(0, 40),
-      emoji: String(t.emoji || "🎯"),
-      color: PALETTE.some((c) => c.id === t.color) ? t.color : "indigo",
-      sets: (Array.isArray(t.sets) && t.sets.length ? t.sets : [{}]).map(
-        (s) => {
-          const br = parseInt(s.break);
-          return {
-            id: String(s.id || uid()),
-            title: String(s.title || "").slice(0, 80),
-            work: clamp(parseInt(s.work) || 25, 1, 180),
-            break: clamp(isNaN(br) ? 5 : br, 0, 60),
-          };
-        },
-      ),
-    }));
+    const mapped = raw.types
+      .filter((t) => t && typeof t === "object")
+      .map((t) => ({
+        id: String(t.id || uid()),
+        name: String(t.name || "Blok").slice(0, 40),
+        emoji: String(t.emoji || "🎯"),
+        color: PALETTE.some((c) => c.id === t.color) ? t.color : "indigo",
+        sets: (Array.isArray(t.sets) && t.sets.length ? t.sets : [{}]).map(
+          (s0) => {
+            const s = s0 && typeof s0 === "object" ? s0 : {};
+            const br = parseInt(s.break);
+            return {
+              id: String(s.id || uid()),
+              title: String(s.title || "").slice(0, 80),
+              work: clamp(parseInt(s.work) || 25, 1, 180),
+              break: clamp(isNaN(br) ? 5 : br, 0, 60),
+            };
+          },
+        ),
+      }));
+    if (mapped.length) out.types = mapped;
   }
 
   const seenT = new Set();
@@ -331,6 +349,8 @@ function normalizeState(raw) {
     }));
   const seenH = new Set();
   out.history = out.history.filter((h) => !seenH.has(h.id) && seenH.add(h.id));
+  if (out.history.length > 5000)
+    out.history = out.history.sort((a, b) => a.ts - b.ts).slice(-5000);
 
   const active = out.types.find((t) => t.id === out.activeTypeId);
   const s = raw.session;
@@ -340,15 +360,15 @@ function normalizeState(raw) {
     Number.isInteger(s.setIndex) &&
     s.setIndex >= 0 &&
     s.setIndex < active.sets.length &&
-    typeof s.remaining === "number" &&
+    Number.isFinite(s.remaining) &&
     s.remaining >= 0;
   out.session = okSession
     ? {
         setIndex: s.setIndex,
         mode: s.mode,
         remaining: Math.round(s.remaining),
-        running: !!s.running,
-        endAt: s.endAt || null,
+        running: !!s.running && !!validEnd(s) && s.mode !== "done",
+        endAt: s.running && s.mode !== "done" ? validEnd(s) : null,
       }
     : freshSession(active);
   return out;
@@ -395,12 +415,18 @@ function migrateOld(old) {
 }
 
 function loadState() {
+  let saved = null;
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    saved = localStorage.getItem(STORAGE_KEY);
     if (saved) return normalizeState(JSON.parse(saved));
     const old = localStorage.getItem(OLD_KEY);
     if (old) return normalizeState(migrateOld(JSON.parse(old)));
-  } catch (_) {}
+  } catch (_) {
+    /* Okunamayan veri üzerine yazılmadan önce ham kopyası ayrı bir anahtarda saklanır */
+    try {
+      if (saved) localStorage.setItem(STORAGE_KEY + "-corrupt", saved);
+    } catch (_) {}
+  }
   return defaultState();
 }
 
@@ -492,12 +518,12 @@ function longestStreak(m = minutesByDay()) {
   return best;
 }
 
-function logHistory(status, minutes) {
+function logHistory(status, minutes, ts = Date.now()) {
   const t = curType();
   const s = curSet();
   state.history.push({
     id: uid(),
-    ts: Date.now(),
+    ts,
     typeId: t.id,
     typeName: t.name,
     emoji: t.emoji,
@@ -556,7 +582,7 @@ function getAudio() {
       return null;
     }
   }
-  if (audio.ctx.state === "suspended") audio.ctx.resume().catch(() => {});
+  if (audio.ctx.state !== "running") audio.ctx.resume().catch(() => {});
   return audio;
 }
 
@@ -658,31 +684,160 @@ function playSound(kind, force = false) {
     );
 }
 
-function notify(title, body) {
-  if (
-    !state.settings.notify ||
-    !("Notification" in window) ||
-    Notification.permission !== "granted"
-  )
-    return;
+/* ---- Bildirim: Android Chrome "new Notification" desteklemez; Service Worker üzerinden gösterilir ---- */
+let swReg = null;
+async function registerSW() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return null;
   try {
-    const n = new Notification(title, { body });
+    swReg = await navigator.serviceWorker.register("./sw.js");
+  } catch (_) {}
+  return swReg;
+}
+
+const isIOS =
+  /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () =>
+  window.matchMedia("(display-mode: standalone)").matches ||
+  navigator.standalone === true;
+const notifGranted = () =>
+  "Notification" in window && Notification.permission === "granted";
+
+function notifHint() {
+  if (!("Notification" in window))
+    return isIOS && !isStandalone()
+      ? "iPhone/iPad'de bildirim için: Paylaş → Ana Ekrana Ekle, sonra uygulamayı oradan aç."
+      : "Bu tarayıcı bildirimleri desteklemiyor.";
+  if (Notification.permission === "denied")
+    return "İzin engellenmiş. Tarayıcının site ayarlarından bildirimlere izin ver.";
+  return "Aşama bittiğinde (uygulama arka plandayken de) uyarı gönderir.";
+}
+
+async function showNotification(title, body) {
+  if (!notifGranted()) return false;
+  const opts = {
+    body,
+    tag: "focusblock",
+    renotify: true,
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    vibrate: [200, 100, 200],
+  };
+  try {
+    if ("serviceWorker" in navigator) {
+      const reg =
+        swReg ||
+        (await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise((r) => setTimeout(() => r(null), 1500)),
+        ]));
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, opts);
+        return true;
+      }
+    }
+  } catch (_) {}
+  try {
+    const n = new Notification(title, opts);
     n.onclick = () => {
       window.focus();
       n.close();
     };
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function enableNotifications() {
+  if (!("Notification" in window)) {
+    toast(notifHint());
+    return false;
+  }
+  let perm = Notification.permission;
+  if (perm === "default") {
+    try {
+      perm = await new Promise((resolve) => {
+        const r = Notification.requestPermission(resolve);
+        if (r && typeof r.then === "function") r.then(resolve);
+      });
+    } catch (_) {}
+  }
+  if (perm !== "granted") {
+    toast(
+      perm === "denied"
+        ? "Bildirim izni engellenmiş — tarayıcı ayarlarından açmalısın"
+        : "Bildirim izni verilmedi",
+    );
+    return false;
+  }
+  await registerSW();
+  return true;
+}
+
+function notify(title, body) {
+  if (!state.settings.notify) return;
+  showNotification(title, body);
+}
+
+function buzz(pattern) {
+  if (!state.settings.vibrate || !navigator.vibrate) return;
+  try {
+    navigator.vibrate(pattern);
   } catch (_) {}
 }
 
-function toast(msg) {
+/* Aşama bitişi: ses + bildirim + titreşim + (ekran açıksa) bildirim şeridi */
+function announce(a) {
+  playSound(a.sound);
+  notify(a.title, a.body);
+  buzz(a.sound === "done" ? [250, 120, 250, 120, 400] : [220, 110, 220]);
+  if (!document.hidden) toast(`${a.title}  ${a.body}`);
+}
+
+/* ---- Ekranı açık tut (mobilde kilitlenince ses/bildirim kaçmasın) ---- */
+let wakeLock = null;
+let wakeBusy = false;
+async function syncWakeLock() {
+  if (!("wakeLock" in navigator) || wakeBusy) return;
+  const want =
+    state.settings.wakeLock && state.session.running && !document.hidden;
+  if (!!wakeLock === want) return;
+  wakeBusy = true;
+  try {
+    if (want) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => (wakeLock = null));
+    } else if (wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (_) {
+    wakeLock = null;
+  } finally {
+    wakeBusy = false;
+  }
+}
+
+function toast(msg, cls = "") {
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = "toast" + (cls ? " " + cls : "");
   el.textContent = msg;
-  $("toastRoot").appendChild(el);
-  setTimeout(() => el.remove(), 2600);
+  const root = $("toastRoot");
+  while (root.children.length >= 3) root.firstChild.remove();
+  root.appendChild(el);
+  setTimeout(() => el.remove(), cls === "tip" ? 1800 : 2600);
 }
 
 let modalResolve = null;
+function beginModal(resolve) {
+  if (modalResolve) {
+    const r = modalResolve;
+    modalResolve = null;
+    r(false);
+  }
+  modalResolve = resolve;
+}
 function openModal(html) {
   $("modalRoot").innerHTML =
     `<div class="modal-backdrop" data-action="modalBackdrop"><div class="modal">${html}</div></div>`;
@@ -697,7 +852,7 @@ function closeModal(result = false) {
 }
 function confirmDialog(title, message, okLabel = "Onayla", danger = false) {
   return new Promise((resolve) => {
-    modalResolve = resolve;
+    beginModal(resolve);
     openModal(`
       <h3>${esc(title)}</h3>
       <p>${esc(message)}</p>
@@ -708,7 +863,7 @@ function confirmDialog(title, message, okLabel = "Onayla", danger = false) {
   });
 }
 function openTemplateModal() {
-  modalResolve = null;
+  beginModal(null);
   openModal(`
     <h3>Yeni blok türü</h3>
     <p>Bir şablonla başla; setleri, süreleri ve renkleri sonra istediğin gibi değiştirebilirsin.</p>
@@ -754,14 +909,36 @@ function applyAppearance() {
 /* ==========================================================================
    4. ZAMANLAYICI MOTORU
    ========================================================================== */
+function mainLabelText() {
+  const se = state.session;
+  if (se.running) return "Duraklat";
+  if (se.mode === "done") return "Yeniden Başla";
+  return se.remaining < phaseTotal() ? "Devam Et" : "Başlat";
+}
+
+/* Sayfayı yeniden çizmeden yalnızca ana düğmeyi ve sayaç göstergelerini günceller
+   (mobilde başlat/duraklat'ta ekranın "yenilenmiş" gibi görünmesini önler) */
+function syncTimerUI() {
+  renderShellState();
+  const btn = document.querySelector(".ctl.main");
+  if (btn) {
+    const label = mainLabelText();
+    btn.innerHTML = `${state.session.running ? I.pause : I.play}<span>${label}</span>`;
+    btn.setAttribute("aria-label", label);
+  }
+  updateTimerDOM();
+}
+
 function startTimer() {
   const se = state.session;
-  if (se.mode === "done") restartRun();
+  const wasDone = se.mode === "done";
+  if (wasDone) restartRun();
   se.running = true;
   se.endAt = Date.now() + se.remaining * 1000;
   playSound("start");
   save();
-  refreshAll();
+  if (wasDone) refreshAll();
+  else syncTimerUI();
 }
 
 function pauseTimer() {
@@ -778,7 +955,7 @@ function toggleTimer() {
   if (state.session.running) {
     pauseTimer();
     playSound("pause");
-    refreshAll();
+    syncTimerUI();
   } else {
     startTimer();
   }
@@ -814,70 +991,151 @@ function jumpToSet(i) {
   refreshAll();
 }
 
-function tick() {
-  const se = state.session;
-  if (!se.running) return;
-  const rem = Math.max(0, Math.ceil((se.endAt - Date.now()) / 1000));
-  if (rem !== se.remaining) {
-    se.remaining = rem;
-    updateTimerDOM();
-  }
-  if (rem <= 0) completePhase(false);
-}
-
-function completePhase(skipped) {
+/* Bir aşamanın bitişini işler (geçmişe yazar, sıradaki aşamaya geçer).
+   Duyuru bilgisini döndürür; ekranı yenilemek / kaydetmek çağıranın işidir. */
+function advancePhase(skipped, at = Date.now()) {
   const se = state.session;
   const type = curType();
   const set = curSet();
   const lastIdx = type.sets.length - 1;
   const label = set.title || `Set ${se.setIndex + 1}`;
+  let ann = null;
 
   if (se.mode === "work") {
     const total = set.work * 60;
     const done = skipped ? Math.floor((total - se.remaining) / 60) : set.work;
     if (done >= 1) {
-      logHistory(skipped ? "partial" : "completed", done);
+      logHistory(skipped ? "partial" : "completed", done, at);
       if (skipped) toast(`${done} dk geçmişe kaydedildi`);
     }
     if (se.setIndex >= lastIdx) {
       se.mode = "done";
       se.remaining = 0;
-      if (!skipped) playSound("done");
-      notify("Tebrikler! 🎉", `${type.name} bloğunun tüm setleri tamamlandı.`);
+      ann = {
+        sound: "done",
+        title: "Tebrikler! 🎉",
+        body: `${type.name} bloğunun tüm setleri tamamlandı.`,
+      };
     } else if (set.break <= 0) {
       se.setIndex++;
       se.mode = "work";
       se.remaining = curSet().work * 60;
-      if (!skipped) playSound("focus");
-      notify("Sıradaki set 🎯", curSet().title || `Set ${se.setIndex + 1}`);
+      ann = {
+        sound: "focus",
+        title: "Sıradaki set 🎯",
+        body: curSet().title || `Set ${se.setIndex + 1}`,
+      };
     } else {
       se.mode = "break";
       se.remaining = set.break * 60;
-      if (!skipped) playSound("break");
-      notify("Mola zamanı ☕", `"${label}" bitti. ${set.break} dk dinlen.`);
+      ann = {
+        sound: "break",
+        title: "Mola zamanı ☕",
+        body: `"${label}" bitti. ${set.break} dk dinlen.`,
+      };
     }
   } else if (se.mode === "break") {
     se.setIndex++;
     se.mode = "work";
     se.remaining = curSet().work * 60;
-    if (!skipped) playSound("focus");
-    notify("Odak zamanı 🎯", curSet().title || `Set ${se.setIndex + 1}`);
+    ann = {
+      sound: "focus",
+      title: "Odak zamanı 🎯",
+      body: curSet().title || `Set ${se.setIndex + 1}`,
+    };
   } else {
     restartRun();
   }
 
   const auto = state.settings.autoStart && se.mode !== "done";
   se.running = auto;
-  se.endAt = auto ? Date.now() + se.remaining * 1000 : null;
+  se.endAt = auto ? at + se.remaining * 1000 : null;
+  return skipped ? null : ann;
+}
+
+/* Aynı anda açık başka sekme/pencere durumu ilerlettiyse onu esas al (çift kayıt olmasın) */
+function adoptStoredIfNewer() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const st = JSON.parse(raw);
+    const a = st && st.session;
+    const se = state.session;
+    if (
+      a &&
+      (a.endAt !== se.endAt || a.setIndex !== se.setIndex || a.mode !== se.mode)
+    ) {
+      state = normalizeState(st);
+      if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
+      applyAppearance();
+      refreshAll();
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+/* Süre dolduysa (arka plan, kilitli ekran, sayfa yeniden yüklendi) aşamaları sırayla tamamlar */
+function catchUp() {
+  const se = state.session;
+  if (!se.running || !se.endAt || se.endAt > Date.now()) return;
+  if (adoptStoredIfNewer()) return;
+  let n = 0;
+  let ann = null;
+  let lastAt = Date.now();
+  while (se.running && se.endAt && se.endAt <= Date.now() && n < 80) {
+    lastAt = se.endAt;
+    ann = advancePhase(false, se.endAt) || ann;
+    n++;
+  }
+  if (!n) return;
   save();
   refreshAll();
+  if (ann && Date.now() - lastAt < 90000) announce(ann);
+  else if (n > 0)
+    toast(
+      n > 1
+        ? `Sen yokken ${n} aşama tamamlandı`
+        : "Sen yokken bir aşama tamamlandı",
+    );
+}
+
+function tick() {
+  const se = state.session;
+  if (!se.running || !se.endAt) return;
+  const left = se.endAt - Date.now();
+  if (left <= 0) return catchUp();
+  const rem = Math.ceil(left / 1000);
+  if (rem !== se.remaining) {
+    se.remaining = rem;
+    updateTimerDOM();
+  }
 }
 
 function skipPhase() {
   const se = state.session;
-  if (se.mode === "done") return (restartRun(), refreshAll());
+  if (se.mode === "done") {
+    restartRun();
+    return refreshAll();
+  }
   if (se.running) pauseTimer();
-  completePhase(true);
+  advancePhase(true);
+  save();
+  refreshAll();
+}
+
+/* Sekme arka plandayken tarayıcı sayfa zamanlayıcılarını yavaşlatır; Worker kullanmak bunu büyük ölçüde önler */
+function startTicker() {
+  try {
+    const src =
+      "let t=null;onmessage=e=>{if(e.data==='start'&&!t)t=setInterval(()=>postMessage(1),500)}";
+    const w = new Worker(
+      URL.createObjectURL(new Blob([src], { type: "text/javascript" })),
+    );
+    w.onmessage = () => tick();
+    w.postMessage("start");
+  } catch (_) {}
+  setInterval(tick, 250);
 }
 
 /* ---- Canlı DOM güncellemesi (her saniye) ---- */
@@ -958,6 +1216,7 @@ function renderShellState() {
   const b = $("sideBar");
   if (b) b.style.width = `${clamp((today / goal) * 100, 0, 100)}%`;
   $("app").classList.toggle("is-running", state.session.running);
+  syncWakeLock();
   document
     .querySelectorAll(".nav-btn")
     .forEach((btn) =>
@@ -966,21 +1225,34 @@ function renderShellState() {
 }
 
 function setView(v) {
+  const changed = ui.view !== v;
   ui.view = v;
   renderShellState();
-  render();
-  $("view").scrollTop = 0;
+  render(changed);
 }
 
-function render() {
+/* animate=true yalnızca görünüm değişince: aynı sayfada yeniden çizimde animasyon/scroll sıçraması olmaz */
+function render(animate = false) {
   const el = $("view");
   const scroll = el.scrollTop;
+  const plan = el.querySelector(".plan-list");
+  const planScroll = plan ? plan.scrollTop : 0;
   if (ui.view === "focus") el.innerHTML = focusHTML();
   else if (ui.view === "blocks") el.innerHTML = blocksHTML();
   else if (ui.view === "history") el.innerHTML = historyHTML();
   else if (ui.view === "stats") el.innerHTML = statsHTML();
   else el.innerHTML = settingsHTML();
-  el.scrollTop = scroll;
+  const page = el.firstElementChild;
+  if (animate) {
+    el.scrollTop = 0;
+    if (page) page.classList.add("enter");
+  } else {
+    el.scrollTop = scroll;
+    const p2 = el.querySelector(".plan-list");
+    if (p2) p2.scrollTop = planScroll;
+  }
+  const heat = el.querySelector(".heat-wrap");
+  if (heat) heat.scrollLeft = heat.scrollWidth;
   updateTimerDOM();
 }
 
@@ -998,14 +1270,7 @@ function focusHTML() {
   const streak = currentStreak();
 
   const modeText = done ? "Tamamlandı" : isBreak ? "Mola" : "Odaklanma";
-  const started = !se.running && !done && se.remaining < phaseTotal();
-  const mainLabel = se.running
-    ? "Duraklat"
-    : done
-      ? "Yeniden Başla"
-      : started
-        ? "Devam Et"
-        : "Başlat";
+  const mainLabel = mainLabelText();
 
   const nextText = done
     ? "Tüm setler bitti"
@@ -1098,7 +1363,7 @@ function focusHTML() {
 
         <div class="controls">
           <button class="ctl" data-action="reset" title="Bu aşamayı sıfırla">${I.reset}</button>
-          <button class="ctl main" data-action="toggle">${se.running ? I.pause : I.play}<span>${mainLabel}</span></button>
+          <button class="ctl main" data-action="toggle" aria-label="${mainLabel}">${se.running ? I.pause : I.play}<span>${mainLabel}</span></button>
           <button class="ctl" data-action="skip" title="Aşamayı atla">${I.skip}</button>
         </div>
       </section>
@@ -1139,8 +1404,8 @@ function editorHTML(t) {
     <div class="set-row" data-i="${i}">
       <span class="no">${i + 1}</span>
       <input class="input" data-field="setTitle" maxlength="80" placeholder="Bu sette ne yapılacak?" value="${esc(s.title)}" />
-      <input class="input num" data-field="setWork" type="number" min="1" max="180" value="${s.work}" title="Odak (dk)" />
-      <input class="input num" data-field="setBreak" type="number" min="0" max="60" value="${s.break}" title="Mola (dk)" />
+      <label class="num-field"><span>Odak dk</span><input class="input num" data-field="setWork" type="number" inputmode="numeric" min="1" max="180" value="${s.work}" aria-label="Odak süresi (dk)" /></label>
+      <label class="num-field"><span>Mola dk</span><input class="input num" data-field="setBreak" type="number" inputmode="numeric" min="0" max="60" value="${s.break}" aria-label="Mola süresi (dk)" /></label>
       <div class="row-actions">
         <button class="icon-btn" data-action="moveSet" data-dir="-1" ${i === 0 ? "disabled" : ""} title="Yukarı taşı">${I.up}</button>
         <button class="icon-btn" data-action="moveSet" data-dir="1" ${i === t.sets.length - 1 ? "disabled" : ""} title="Aşağı taşı">${I.down}</button>
@@ -1182,8 +1447,8 @@ function editorHTML(t) {
 
   <div class="bulk">
     <span>Tüm setlere uygula:</span>
-    Odak <input class="input num" id="bulkWork" type="number" min="1" max="180" value="${t.sets[0].work}" /> dk
-    Mola <input class="input num" id="bulkBreak" type="number" min="0" max="60" value="${t.sets[0].break}" /> dk
+    Odak <input class="input num" id="bulkWork" type="number" inputmode="numeric" min="1" max="180" value="${t.sets[0].work}" /> dk
+    Mola <input class="input num" id="bulkBreak" type="number" inputmode="numeric" min="0" max="60" value="${t.sets[0].break}" /> dk
     <button class="btn small" data-action="bulkApply">Uygula</button>
   </div>
 
@@ -1362,7 +1627,7 @@ function statsHTML() {
         lb = i % 5 === 0 || i === days - 1 ? String(x.d.getDate()) : "";
       else lb = i % 15 === 0 ? `${x.d.getDate()}/${x.d.getMonth() + 1}` : "";
       const h = x.min > 0 ? Math.max(4, Math.round((x.min / maxV) * H)) : 3;
-      return `<div class="col" title="${esc(dayLabel(x.key))}: ${fmtDur(x.min)}">
+      return `<div class="col" title="${esc(dayLabel(x.key))}: ${fmtDur(x.min)}" data-action="tip" data-tip="${esc(dayLabel(x.key))}: ${fmtDur(x.min)}">
         <div class="b ${x.min === 0 ? "zero" : x.min >= goal ? "hit" : ""}" style="height:${h}px"></div>
         <div class="lb">${lb}</div></div>`;
     })
@@ -1372,12 +1637,12 @@ function statsHTML() {
   /* Blok dağılımı */
   const dist = {};
   inRange.forEach((h) => {
-    const k = h.typeName + "|" + h.color + "|" + h.emoji;
+    const k = JSON.stringify([h.typeName, h.color, h.emoji]);
     dist[k] = (dist[k] || 0) + h.minutes;
   });
   const distList = Object.entries(dist)
     .map(([k, v]) => {
-      const [name, color, emoji] = k.split("|");
+      const [name, color, emoji] = JSON.parse(k);
       return { name, color, emoji, v };
     })
     .sort((a, b) => b.v - a.v);
@@ -1397,7 +1662,7 @@ function statsHTML() {
     const m = mMap[dayKey(d)] || 0;
     const lvl =
       m <= 0 ? 0 : m < goal * 0.25 ? 1 : m < goal * 0.5 ? 2 : m < goal ? 3 : 4;
-    cells += `<div class="cell ${lvl ? "l" + lvl : ""}" title="${esc(dayLabel(dayKey(d)))}: ${fmtDur(m)}"></div>`;
+    cells += `<div class="cell ${lvl ? "l" + lvl : ""}" title="${esc(dayLabel(dayKey(d)))}: ${fmtDur(m)}" data-action="tip" data-tip="${esc(dayLabel(dayKey(d)))}: ${fmtDur(m)}"></div>`;
   }
 
   /* Ritim: saat & haftanın günü */
@@ -1408,12 +1673,12 @@ function statsHTML() {
     hours[d.getHours()] += h.minutes;
     wdays[(d.getDay() + 6) % 7] += h.minutes;
   });
-  const miniCol = (arr, labels) => {
+  const miniCol = (arr, labels, names) => {
     const mx = Math.max(...arr, 1);
     return arr
       .map(
         (v, i) =>
-          `<div class="col" title="${fmtDur(v)}"><div class="b ${v === 0 ? "zero" : ""}" style="height:${v > 0 ? Math.max(4, Math.round((v / mx) * 80)) : 3}px"></div><div class="lb">${labels[i] ?? ""}</div></div>`,
+          `<div class="col" title="${fmtDur(v)}" data-action="tip" data-tip="${esc(names[i])}: ${fmtDur(v)}"><div class="b ${v === 0 ? "zero" : ""}" style="height:${v > 0 ? Math.max(4, Math.round((v / mx) * 80)) : 3}px"></div><div class="lb">${labels[i] ?? ""}</div></div>`,
       )
       .join("");
   };
@@ -1453,7 +1718,7 @@ function statsHTML() {
     <div class="stats-grid">
       <section class="card wide">
         <div class="card-head"><span class="card-title">Günlük odak süresi</span></div>
-        <div class="chart">
+        <div class="chart ${days > 45 ? "dense" : ""}">
           <div class="goal-line" style="bottom:${goalBottom}px"><span>Hedef ${fmtDur(goal)}</span></div>
           ${bars}
         </div>
@@ -1475,11 +1740,15 @@ function statsHTML() {
         <div class="rhythm">
           <div>
             <div class="field-label">Saate göre ${total ? `· en yoğun ${pad(peakHour)}:00` : ""}</div>
-            <div class="mini-chart">${miniCol(hours, hourLabels)}</div>
+            <div class="mini-chart">${miniCol(
+              hours,
+              hourLabels,
+              hours.map((_, i) => `${pad(i)}:00`),
+            )}</div>
           </div>
           <div>
             <div class="field-label">Güne göre ${total ? `· en yoğun ${wdNames[peakDay]}` : ""}</div>
-            <div class="mini-chart">${miniCol(wdays, ["Pt", "Sa", "Ça", "Pe", "Cu", "Ct", "Pz"])}</div>
+            <div class="mini-chart">${miniCol(wdays, ["Pt", "Sa", "Ça", "Pe", "Cu", "Ct", "Pz"], wdNames)}</div>
           </div>
         </div>
       </section>
@@ -1529,9 +1798,12 @@ function settingsHTML() {
           </div>
         </div>
         <div class="s-row">
-          <div class="info"><b>Masaüstü bildirimleri</b><span>Sekme arkadayken mola ve odak uyarısı gönder.</span></div>
-          ${sw("notify", s.notify)}
+          <div class="info"><b>Bildirimler</b><span>${esc(notifHint())}</span></div>
+          ${sw("notify", s.notify && notifGranted())}
         </div>
+        ${s.notify && notifGranted() ? `<div class="sound-tests"><button class="chip" data-action="testNotif">🔔 Test bildirimi gönder</button></div>` : ""}
+        ${"vibrate" in navigator ? `<div class="s-row"><div class="info"><b>Titreşim</b><span>Aşama bittiğinde telefon titrer.</span></div>${sw("vibrate", s.vibrate)}</div>` : ""}
+        ${"wakeLock" in navigator ? `<div class="s-row"><div class="info"><b>Ekranı açık tut</b><span>Sayaç çalışırken ekran kapanmaz; ses ve bildirim kaçmaz.</span></div>${sw("wakeLock", s.wakeLock)}</div>` : ""}
         <div class="s-row">
           <div class="info"><b>Günlük hedef</b><span>İstatistik ve ilerleme çubukları buna göre hesaplanır.</span></div>
           <div class="stepper">
@@ -1557,21 +1829,53 @@ function settingsHTML() {
 
       <section class="card set-section">
         <span class="card-title">Veri ve yedekleme</span>
-        <div class="s-row">
+        ${
+          needsBackup()
+            ? `<div class="nag">${
+                s.lastBackup
+                  ? `Son yedeğin ${Math.floor((Date.now() - s.lastBackup) / DAY_MS)} gün önce.`
+                  : "Henüz hiç yedek almadın."
+              } Tarayıcı verileri silinirse kayıtların gider; şimdi bir yedek al.</div>`
+            : ""
+        }
+        <div class="s-row nb">
           <div class="info">
-            <b>Yedek al</b>
+            <b>Yedek durumu</b>
             <span>${
               s.lastBackup
-                ? `Son yedek: ${esc(new Date(s.lastBackup).toLocaleString("tr-TR", { dateStyle: "medium", timeStyle: "short" }))}`
-                : "Henüz yedek almadın. Tarayıcı verilerini temizlersen kayıtların silinir; ara sıra yedek indir."
-            }</span>
+                ? `Son yedek: ${esc(whenText(s.lastBackup))}`
+                : "Henüz yedek alınmadı."
+            } · ${state.types.length} blok, ${state.history.length} kayıt</span>
           </div>
         </div>
-        <div class="data-actions" style="padding-top:0">
+        <div class="data-actions" style="padding-top:4px">
           <button class="btn primary" data-action="exportData">${I.download} Yedeği indir</button>
-          <button class="btn" data-action="importData">${I.upload} Yedekten yükle</button>
+          ${canShareFiles() ? `<button class="btn" data-action="shareData">${I.upload} Paylaş / Dosyalara kaydet</button>` : ""}
+          <button class="btn" data-action="copyData">${I.copy} Panoya kopyala</button>
+        </div>
+        <div class="data-actions" style="padding-top:8px">
+          <button class="btn" data-action="importData">${I.upload} Dosyadan yükle</button>
+          <button class="btn" data-action="pasteData">${I.upload} Metinden yükle</button>
           <button class="btn" data-action="exportCSV">${I.download} Geçmiş (CSV)</button>
         </div>
+        ${
+          readAuto().length
+            ? `<div class="auto-list">
+                <div class="auto-head">Otomatik yedekler <span>bu cihazda, günde bir · son ${AUTO_KEEP}</span></div>
+                ${readAuto()
+                  .map((a, i) => ({ a, i }))
+                  .reverse()
+                  .map(
+                    ({ a, i }) => `
+                  <div class="auto-row">
+                    <div><b>${esc(whenText(a.at))}</b><span>${a.counts ? `${a.counts.types} blok · ${a.counts.history} kayıt · ${esc(fmtDur(a.counts.minutes))}` : ""}</span></div>
+                    <button class="btn small" data-action="restoreAuto" data-i="${i}">Geri yükle</button>
+                  </div>`,
+                  )
+                  .join("")}
+              </div>`
+            : ""
+        }
         ${
           hasUndo()
             ? `<div class="s-row" style="margin-top:8px">
@@ -1585,7 +1889,7 @@ function settingsHTML() {
           <button class="btn danger small" data-action="clearHist" ${state.history.length ? "" : "disabled"}>Temizle</button>
         </div>
         <div class="s-row">
-          <div class="info"><b>Her şeyi sıfırla</b><span>Tüm veriler silinir ve varsayılan bloklar geri gelir.</span></div>
+          <div class="info"><b>Her şeyi sıfırla</b><span>Tüm veriler silinir ve varsayılan bloklar geri gelir. Otomatik yedekler korunur.</span></div>
           <button class="btn danger small" data-action="resetAll">Sıfırla</button>
         </div>
       </section>
@@ -1605,6 +1909,8 @@ function settingsHTML() {
    YEDEKLEME
    ========================================================================== */
 const BACKUP_APP = "focusblock-pro";
+const AUTO_KEEP = 5;
+const DAY_MS = 86400000;
 
 function downloadFile(name, text, type) {
   const blob = new Blob([text], { type });
@@ -1626,30 +1932,106 @@ const stampName = () => {
   return `${dayKey(d)}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 };
 
-function exportBackup() {
-  if (state.session.running) pauseTimer();
-  state.settings.lastBackup = Date.now();
-  save();
+const countsOf = (src) => ({
+  types: src.types.length,
+  history: src.history.length,
+  minutes: src.history.reduce((a, h) => a + h.minutes, 0),
+});
+
+const whenText = (ts) =>
+  ts
+    ? new Date(ts).toLocaleString("tr-TR", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : "belirtilmemiş";
+
+function backupData() {
+  return {
+    settings: state.settings,
+    types: state.types,
+    activeTypeId: state.activeTypeId,
+    history: state.history,
+  };
+}
+
+function buildBackup() {
+  const counts = countsOf(state);
   const payload = {
     app: BACKUP_APP,
-    version: 2,
+    version: 3,
     exportedAt: Date.now(),
-    data: {
-      settings: state.settings,
-      types: state.types,
-      activeTypeId: state.activeTypeId,
-      history: state.history,
-    },
+    counts,
+    data: backupData(),
   };
-  downloadFile(
-    `focusblock-yedek-${stampName()}.json`,
-    JSON.stringify(payload, null, 2),
-    "application/json",
-  );
-  refreshAll();
-  toast(
-    `Yedek indirildi · ${state.types.length} blok, ${state.history.length} kayıt`,
-  );
+  return {
+    json: JSON.stringify(payload, null, 2),
+    name: `focusblock-yedek-${stampName()}.json`,
+    counts,
+  };
+}
+
+function markBackedUp(c) {
+  state.settings.lastBackup = Date.now();
+  save();
+  if (ui.view === "settings") render();
+  toast(`Yedek hazır · ${c.types} blok, ${c.history} kayıt`);
+}
+
+/* Not: yedek almak çalışan zamanlayıcıyı artık durdurmaz */
+function exportBackup() {
+  const b = buildBackup();
+  downloadFile(b.name, b.json, "application/json");
+  markBackedUp(b.counts);
+}
+
+function canShareFiles() {
+  try {
+    return (
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({
+        files: [new File(["{}"], "a.json", { type: "application/json" })],
+      })
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+async function shareBackup() {
+  const b = buildBackup();
+  try {
+    const file = new File([b.json], b.name, { type: "application/json" });
+    await navigator.share({ files: [file], title: "FocusBlock yedeği" });
+    markBackedUp(b.counts);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    toast("Paylaşım açılamadı; dosya olarak indiriliyor");
+    downloadFile(b.name, b.json, "application/json");
+    markBackedUp(b.counts);
+  }
+}
+
+async function copyBackup() {
+  const b = buildBackup();
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(b.json);
+    ok = true;
+  } catch (_) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = b.json;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      ta.remove();
+    } catch (_) {}
+  }
+  if (ok) markBackedUp(b.counts);
+  else toast("Panoya kopyalanamadı; dosya olarak indirmeyi dene");
 }
 
 function exportCSV() {
@@ -1675,7 +2057,7 @@ function exportCSV() {
         h.status === "completed" ? "Tamamlandı" : "Yarım",
       ]),
     );
-  const csv = "﻿" + rows.map((r) => r.map(q).join(";")).join("\r\n");
+  const csv = "\uFEFF" + rows.map((r) => r.map(q).join(";")).join("\r\n");
   downloadFile(
     `focusblock-gecmis-${stampName()}.csv`,
     csv,
@@ -1688,25 +2070,44 @@ function exportCSV() {
 function parseBackup(text) {
   let raw;
   try {
-    raw = JSON.parse(String(text).replace(/^﻿/, ""));
+    raw = JSON.parse(
+      String(text)
+        .replace(/^\uFEFF/, "")
+        .trim(),
+    );
   } catch (_) {
-    throw new Error("Dosya geçerli bir JSON değil.");
+    throw new Error(
+      "Geçerli bir JSON değil. Dosyayı/metni tam yapıştırdığından emin ol.",
+    );
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
-    throw new Error("Dosya içeriği tanınamadı.");
+    throw new Error("İçerik tanınamadı.");
   let data = raw;
   let exportedAt = null;
+  let expected = null;
   if (raw.app === BACKUP_APP && raw.data && typeof raw.data === "object") {
     data = raw.data;
     exportedAt = Number(raw.exportedAt) || null;
+    expected = raw.counts && typeof raw.counts === "object" ? raw.counts : null;
+  } else if (raw.app && raw.app !== BACKUP_APP) {
+    throw new Error("Bu, FocusBlock yedeği değil.");
   }
   if (Array.isArray(data.subjects) && !Array.isArray(data.types))
     data = migrateOld(data);
   if (!Array.isArray(data.types) || !data.types.length)
-    throw new Error("Bu dosyada FocusBlock verisi bulunamadı.");
-  return { norm: normalizeState({ ...data, session: null }), exportedAt };
+    throw new Error("Bu içerikte FocusBlock verisi bulunamadı.");
+  const norm = normalizeState({ ...data, session: null });
+  let warn = "";
+  if (
+    expected &&
+    Number.isFinite(expected.history) &&
+    expected.history !== norm.history.length
+  )
+    warn = `Yedek ${expected.history} kayıt içermeliydi ama ${norm.history.length} kayıt okunabildi; dosya eksik veya bozuk olabilir.`;
+  return { norm, exportedAt, warn };
 }
 
+/* ---- Geri alma (tek seviye) ---- */
 function snapshotForUndo() {
   try {
     localStorage.setItem(PREV_KEY, JSON.stringify({ at: Date.now(), state }));
@@ -1741,23 +2142,66 @@ function undoImport() {
   }
 }
 
-function chooseImportMode(norm, when) {
+/* ---- Otomatik yerel yedekler: günde bir, son 5 tanesi bu cihazda saklanır ---- */
+function readAuto() {
+  try {
+    const a = JSON.parse(localStorage.getItem(AUTO_KEY));
+    return Array.isArray(a) ? a : [];
+  } catch (_) {
+    return [];
+  }
+}
+function writeAuto(list) {
+  for (;;) {
+    try {
+      localStorage.setItem(AUTO_KEY, JSON.stringify(list));
+      return true;
+    } catch (_) {
+      if (list.length <= 1) {
+        try {
+          localStorage.removeItem(AUTO_KEY);
+        } catch (_) {}
+        return false;
+      }
+      list = list.slice(1); // yer yoksa en eskiyi at
+    }
+  }
+}
+function autoSnapshot() {
+  if (!state.history.length) return;
+  const list = readAuto();
+  const last = list[list.length - 1];
+  const c = countsOf(state);
+  const sig = `${c.types}:${c.history}:${c.minutes}`;
+  if (last && (dayKey(last.at) === dayKey(Date.now()) || last.sig === sig))
+    return;
+  list.push({ at: Date.now(), sig, counts: c, data: backupData() });
+  writeAuto(list.slice(-AUTO_KEEP));
+}
+
+const needsBackup = () =>
+  state.history.length >= 3 &&
+  (!state.settings.lastBackup ||
+    Date.now() - state.settings.lastBackup > 14 * DAY_MS);
+
+function chooseImportMode(norm, when, warn) {
   return new Promise((resolve) => {
-    modalResolve = resolve;
+    beginModal(resolve);
     const haveT = new Set(state.types.map((t) => t.id));
     const haveH = new Set(state.history.map((h) => h.id));
     const newT = norm.types.filter((t) => !haveT.has(t.id)).length;
     const newH = norm.history.filter((h) => !haveH.has(h.id)).length;
-    const totalMin = norm.history.reduce((a, h) => a + h.minutes, 0);
+    const nc = countsOf(norm);
+    const cc = countsOf(state);
     openModal(`
-      <h3>Yedek dosyası okundu</h3>
+      <h3>Yedek okundu</h3>
       <p>Yedek tarihi: ${esc(when)}</p>
-      <div class="imp-stats">
-        <div><b>${norm.types.length}</b><span>Blok</span></div>
-        <div><b>${norm.history.length}</b><span>Kayıt</span></div>
-        <div><b>${esc(fmtDur(totalMin))}</b><span>Toplam odak</span></div>
+      ${warn ? `<p class="warn">⚠️ ${esc(warn)}</p>` : ""}
+      <div class="imp-cmp">
+        <div><span>Yedekte</span><b>${nc.types} blok · ${nc.history} kayıt · ${esc(fmtDur(nc.minutes))}</b></div>
+        <div><span>Bu cihazda</span><b>${cc.types} blok · ${cc.history} kayıt · ${esc(fmtDur(cc.minutes))}</b></div>
       </div>
-      <p><b>Birleştir:</b> bu cihazdaki veriye yalnızca eksik olanlar eklenir (${newT} yeni blok, ${newH} yeni kayıt); hiçbir şey silinmez.<br><b>Değiştir:</b> mevcut veri yedektekiyle yer değiştirir. İkisini de Ayarlar'dan geri alabilirsin.</p>
+      <p><b>Birleştir:</b> yalnızca eksik olanlar eklenir (${newT} yeni blok, ${newH} yeni kayıt); hiçbir şey silinmez.<br><b>Değiştir:</b> mevcut veri yedektekiyle yer değiştirir. İkisini de Ayarlar'dan geri alabilirsin.</p>
       <div class="modal-actions col">
         <button class="btn primary" data-action="impMerge">Birleştir (önerilen)</button>
         <button class="btn" data-action="impReplace">Mevcut verinin yerine koy</button>
@@ -1766,26 +2210,11 @@ function chooseImportMode(norm, when) {
   });
 }
 
-async function handleImportFile(file) {
-  if (file.size > 20 * 1024 * 1024)
-    return toast("Dosya çok büyük (en fazla 20 MB)");
-  let parsed;
-  try {
-    parsed = parseBackup(await file.text());
-  } catch (err) {
-    return toast(err.message || "Yedek dosyası okunamadı");
-  }
-  const { norm, exportedAt } = parsed;
-  const when = exportedAt
-    ? new Date(exportedAt).toLocaleString("tr-TR", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-    : "belirtilmemiş";
-  const choice = await chooseImportMode(norm, when);
+async function applyBackup(norm, when, warn = "") {
+  const choice = await chooseImportMode(norm, when, warn);
   if (choice !== "merge" && choice !== "replace") return;
 
-  if (state.session.running) pauseTimer();
+  if (choice === "replace" && state.session.running) pauseTimer();
   snapshotForUndo();
 
   if (choice === "replace") {
@@ -1819,6 +2248,8 @@ async function handleImportFile(file) {
     }
   });
   state.history.sort((a, b) => a.ts - b.ts);
+  if (state.history.length > 5000)
+    state.history.splice(0, state.history.length - 5000);
   save();
   refreshAll();
   toast(
@@ -1826,6 +2257,56 @@ async function handleImportFile(file) {
       ? `${addedT} blok, ${addedH} kayıt eklendi`
       : "Yedekteki her şey zaten bu cihazda var",
   );
+}
+
+async function handleImportText(text) {
+  let parsed;
+  try {
+    parsed = parseBackup(text);
+  } catch (err) {
+    return toast(err.message || "Yedek okunamadı");
+  }
+  await applyBackup(parsed.norm, whenText(parsed.exportedAt), parsed.warn);
+}
+
+async function handleImportFile(file) {
+  if (file.size > 20 * 1024 * 1024)
+    return toast("Dosya çok büyük (en fazla 20 MB)");
+  let text;
+  try {
+    text = await file.text();
+  } catch (_) {
+    return toast("Dosya okunamadı");
+  }
+  return handleImportText(text);
+}
+
+async function restoreAuto(i) {
+  const snap = readAuto()[i];
+  if (!snap || !snap.data) return toast("Bu yedek bulunamadı");
+  let norm;
+  try {
+    norm = normalizeState({ ...snap.data, session: null });
+  } catch (_) {
+    return toast("Bu otomatik yedek okunamadı");
+  }
+  await applyBackup(norm, `${whenText(snap.at)} (otomatik yedek)`);
+}
+
+function openPasteModal() {
+  beginModal(null);
+  openModal(`
+    <h3>Metinden geri yükle</h3>
+    <p>“Panoya kopyala” ile aldığın yedek metnini ya da .json dosyasının içeriğini buraya yapıştır.</p>
+    <textarea id="pasteBox" class="input paste-box" rows="7" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Yedek metni buraya yapıştırılır"></textarea>
+    <div class="modal-actions">
+      <button class="btn" data-action="modalNo">Vazgeç</button>
+      <button class="btn primary" data-action="pasteGo">Devam</button>
+    </div>`);
+  setTimeout(() => {
+    const t = $("pasteBox");
+    if (t) t.focus();
+  }, 60);
 }
 
 /* ==========================================================================
@@ -1853,6 +2334,12 @@ document.addEventListener("click", async (e) => {
   if (a === "modalNo") return closeModal(false);
   if (a === "impMerge") return closeModal("merge");
   if (a === "impReplace") return closeModal("replace");
+  if (a === "pasteGo") {
+    const txt = ($("pasteBox") || {}).value || "";
+    if (!txt.trim()) return toast("Önce yedek metnini yapıştır");
+    closeModal(false);
+    return handleImportText(txt);
+  }
   if (a === "tpl") {
     const t = makeType(TEMPLATES[parseInt(d.i)]);
     state.types.push(t);
@@ -1866,13 +2353,19 @@ document.addEventListener("click", async (e) => {
   switch (a) {
     case "nav":
       return setView(d.view);
+    case "tip": {
+      document.querySelectorAll(".toast.tip").forEach((n) => n.remove());
+      return toast(d.tip, "tip");
+    }
 
     /* Odaklan */
     case "toggle":
       return toggleTimer();
-    case "reset":
+    case "reset": {
+      const wasDone = state.session.mode === "done";
       resetPhase();
-      return refreshAll();
+      return wasDone ? refreshAll() : syncTimerUI();
+    }
     case "skip":
       return skipPhase();
     case "restartRun": {
@@ -2062,17 +2555,27 @@ document.addEventListener("click", async (e) => {
     /* Ayarlar */
     case "toggleSetting": {
       const key = d.key;
-      if (key === "notify" && !state.settings.notify) {
-        if (!("Notification" in window))
-          return toast("Tarayıcın bildirimleri desteklemiyor");
-        const perm =
-          Notification.permission === "granted"
-            ? "granted"
-            : await Notification.requestPermission();
-        if (perm !== "granted") return toast("Bildirim izni verilmedi");
+      if (key === "notify") {
+        if (state.settings.notify && notifGranted()) {
+          state.settings.notify = false;
+        } else {
+          if (!(await enableNotifications())) {
+            state.settings.notify = false;
+            save();
+            return render();
+          }
+          state.settings.notify = true;
+          showNotification(
+            "Bildirimler açık ✅",
+            "Aşamalar bittiğinde buradan haber vereceğim.",
+          );
+        }
+        save();
+        return render();
       }
       state.settings[key] = !state.settings[key];
       save();
+      if (key === "wakeLock") syncWakeLock();
       return render();
     }
     case "goal":
@@ -2096,6 +2599,22 @@ document.addEventListener("click", async (e) => {
       return render();
     case "exportData":
       return exportBackup();
+    case "shareData":
+      return shareBackup();
+    case "copyData":
+      return copyBackup();
+    case "pasteData":
+      return openPasteModal();
+    case "restoreAuto":
+      return restoreAuto(parseInt(d.i));
+    case "testNotif": {
+      const ok = await showNotification(
+        "FocusBlock testi",
+        "Bildirimler çalışıyor 🎉",
+      );
+      buzz([200, 100, 200]);
+      return toast(ok ? "Test bildirimi gönderildi" : "Bildirim gösterilemedi");
+    }
     case "exportCSV":
       return exportCSV();
     case "undoImport":
@@ -2177,6 +2696,7 @@ document.addEventListener("keydown", (e) => {
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   if ($("modalRoot").innerHTML) return;
   if (e.code === "Space" && ui.view === "focus") {
+    if (tag === "BUTTON" || tag === "A") return;
     e.preventDefault();
     toggleTimer();
   } else if (/^[1-5]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -2184,7 +2704,27 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-document.addEventListener("visibilitychange", tick);
+document.addEventListener("visibilitychange", () => {
+  tick();
+  if (!document.hidden) {
+    syncWakeLock();
+    updateTimerDOM();
+    autoSnapshot();
+  }
+});
+window.addEventListener("pageshow", tick);
+window.addEventListener("focus", tick);
+
+/* Başka sekmede yapılan değişiklikler bu sekmeye yansısın (üst üste yazmayı önler) */
+window.addEventListener("storage", (e) => {
+  if (e.key !== STORAGE_KEY || !e.newValue) return;
+  try {
+    state = normalizeState(JSON.parse(e.newValue));
+    if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
+    applyAppearance();
+    refreshAll();
+  } catch (_) {}
+});
 
 /* ==========================================================================
    7. BAŞLANGIÇ
@@ -2194,22 +2734,37 @@ document.addEventListener("visibilitychange", tick);
   buildShell();
   /* Ses motoru ilk dokunuşta hazırlansın (otomatik başlayan aşamalarda da ses çıksın) */
   document.addEventListener("pointerdown", () => getAudio(), { once: true });
+  registerSW();
+  /* Tarayıcıdan "verilerimi otomatik silme" iste (özellikle iOS Safari için önemli) */
+  try {
+    if (navigator.storage && navigator.storage.persist)
+      navigator.storage.persist();
+  } catch (_) {}
 
-  /* Sayfa kapanıp açıldıysa: süre dolmadıysa devam et, dolduysa duraklat */
+  /* Sayfa kapanıp açıldıysa: süre dolmadıysa devam et, dolduysa aşamaları tamamlayıp geçmişe yaz */
   const se = state.session;
-  if (se.running) {
-    if (se.endAt && se.endAt > Date.now()) {
-      se.remaining = Math.ceil((se.endAt - Date.now()) / 1000);
-    } else {
-      se.running = false;
-      se.endAt = null;
-      se.remaining = phaseTotal();
-    }
+  if (se.running && se.endAt) {
+    se.remaining = Math.max(0, Math.ceil((se.endAt - Date.now()) / 1000));
   }
+  catchUp();
+  save();
 
   renderShellState();
-  render();
-  setInterval(tick, 250);
+  render(true);
+  startTicker();
+  autoSnapshot();
   /* "Kalan / tahmini bitiş" değerleri dakikada bir tazelensin (duraklatılmışken de) */
   setInterval(() => ui.view === "focus" && updateTimerDOM(), 15000);
+
+  /* Günde en fazla bir kez yedek hatırlatması */
+  try {
+    const today = dayKey(new Date());
+    if (needsBackup() && localStorage.getItem(NAG_KEY) !== today) {
+      localStorage.setItem(NAG_KEY, today);
+      setTimeout(
+        () => toast("Bir süredir yedek almadın · Ayarlar → Veri ve yedekleme"),
+        2500,
+      );
+    }
+  } catch (_) {}
 })();
