@@ -1767,21 +1767,38 @@ function statsHTML() {
     .sort((a, b) => b.v - a.v);
   const distTotal = distList.reduce((a, x) => a + x.v, 0);
 
-  /* Isı haritası — GitHub katkı grafiği tarzı (yıl / aylar, veri aralığına göre) */
+  /* Isı haritası */
   const allKeys = Object.keys(mMap)
     .filter((k) => mMap[k] > 0)
     .sort();
-  let heatFirst = allKeys.length
-    ? new Date(allKeys[0] + "T12:00:00")
-    : addDays(today, -364);
-  /* En az 12 hafta, en fazla ~2 yıl; Pazartesi hizalı başlangıç */
-  const minStart = addDays(today, -7 * 104);
-  if (heatFirst < minStart) heatFirst = minStart;
+
+  /* Veri başlangıcı */
+  let heatFirst = allKeys.length ? new Date(allKeys[0] + "T12:00:00") : today;
+
+  /* En az 1 yıl, en fazla 2 yıl göster */
+  const minStart = addDays(today, -364);
+  const maxStart = addDays(today, -7 * 104);
+
+  /* En az 1 yıl göster */
+  if (heatFirst > minStart) {
+    heatFirst = minStart;
+  }
+
+  /* En fazla 2 yıl geriye git */
+  if (heatFirst < maxStart) {
+    heatFirst = maxStart;
+  }
+
+  /* Pazartesi hizala */
   const heatDow = (heatFirst.getDay() + 6) % 7;
   heatFirst = addDays(heatFirst, -heatDow);
+
+  /* Bugünün bulunduğu haftanın Pazar günü */
   const endDow = (today.getDay() + 6) % 7;
-  const heatEnd = addDays(today, 6 - endDow); /* haftanın sonuna tamamla */
+  const heatEnd = addDays(today, 6 - endDow);
+
   const totalDays = Math.round((heatEnd - heatFirst) / 86400000) + 1;
+
   const weeks = Math.ceil(totalDays / 7);
 
   const monthNames = [
@@ -1798,14 +1815,18 @@ function statsHTML() {
     "Kas",
     "Ara",
   ];
+
   let cells = "";
   let monthLabels = [];
   let lastMonthKey = "";
+
   for (let i = 0; i < weeks * 7; i++) {
     const d = addDays(heatFirst, i);
     const key = dayKey(d);
+
     const isFuture = d > today;
     const m = isFuture ? 0 : mMap[key] || 0;
+
     const lvl = isFuture
       ? -1
       : m <= 0
@@ -1817,30 +1838,41 @@ function statsHTML() {
             : m < goal
               ? 3
               : 4;
+
+    /* Her haftanın başında ay kontrolü */
     if (i % 7 === 0) {
       const mk = `${d.getFullYear()}-${d.getMonth()}`;
-      if (mk !== lastMonthKey && d.getDate() <= 7) {
+
+      if (mk !== lastMonthKey) {
         lastMonthKey = mk;
+
         monthLabels.push({
           week: Math.floor(i / 7),
           label:
             d.getMonth() === 0
-              ? `${monthNames[0]} ${d.getFullYear()}`
+              ? `${monthNames[d.getMonth()]} ${d.getFullYear()}`
               : monthNames[d.getMonth()],
         });
-      } else {
-        monthLabels.push({ week: Math.floor(i / 7), label: "" });
       }
     }
+
     const tip = isFuture ? "" : `${esc(dayLabel(key))}: ${fmtDur(m)}`;
-    cells += `<div class="cell ${lvl < 0 ? "off" : lvl ? "l" + lvl : ""}" ${tip ? `title="${tip}" data-action="tip" data-tip="${tip}"` : ""}></div>`;
+
+    cells += `
+    <div
+      class="cell ${lvl < 0 ? "off" : lvl ? "l" + lvl : ""}"
+      ${tip ? `title="${tip}" data-action="tip" data-tip="${tip}"` : ""}
+    ></div>
+  `;
   }
+
   const monthRow = monthLabels
     .map(
       (x) =>
         `<span class="heat-month" style="grid-column:${x.week + 1}">${x.label}</span>`,
     )
     .join("");
+
   const heatTitle =
     weeks <= 16
       ? `Son ${weeks} hafta`
@@ -2034,7 +2066,7 @@ function settingsHTML() {
         <div class="data-actions" style="padding-top:4px">
           <button class="btn primary" data-action="exportBackup">${I.download} Tam yedek indir</button>
           <button class="btn" data-action="importBackup">${I.upload} Yedekten geri yükle</button>
-          <!-- <button class="btn" data-action="exportCSV">${I.download} Geçmişi CSV</button> ########### GEÇİCİ OLARAK KAPALI ########### -->
+          <!-- <button class="btn" data-action="exportCSV">${I.download} Geçmişi CSV</button> ########### GEÇİCİ OLARAK KAPALI  -->
         </div>
         <p class="sync-note">Tam yedek tüm blokları, geçmişi, ayarları ve silme mezar taşlarını içerir. Cihazlar arasında aktarmak veya Drive dışı saklamak için kullan. Geri yüklerken birleştir veya üzerine yaz seçebilirsin.</p>
         ${
