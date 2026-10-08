@@ -8,11 +8,21 @@
 /* ==========================================================================
    1. SABİTLER & YARDIMCILAR
    ========================================================================== */
+import {
+  SyncError,
+  initGoogleAuth,
+  requestToken,
+  findSyncFile,
+  downloadFile as downloadDriveFile,
+  uploadFile,
+  getAccountEmail,
+  signOutGoogle,
+} from "./services/googleSync.js";
+
 const STORAGE_KEY = "focusblock-v2";
+const SYNC_KEY = "focusblock-v2-sync";
 const OLD_KEY = "focusblock-pro-state";
 const PREV_KEY = "focusblock-v2-prev";
-const AUTO_KEY = "focusblock-v2-auto";
-const NAG_KEY = "focusblock-v2-nag";
 
 const PALETTE = [
   { id: "indigo", hex: "#6366f1" },
@@ -135,6 +145,22 @@ const I = {
     '<path d="M12 16V5"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/>',
   ),
   bolt: ico('<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>'),
+  cloud: ico(
+    '<path d="M7 18a4 4 0 010-8 5.5 5.5 0 0110.7-1.5A4.5 4.5 0 0117 18H7z"/>',
+  ),
+  sync: ico(
+    '<path d="M20 11a8 8 0 00-14.9-3"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0014.9 3"/><path d="M20 20v-4h-4"/>',
+  ),
+  shield: ico('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'),
+  mail: ico(
+    '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>',
+  ),
+  external: ico(
+    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+  ),
+  arrowLeft: ico(
+    '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>',
+  ),
 };
 
 const NAV = [
@@ -267,6 +293,8 @@ function defaultState() {
     activeTypeId: types[0].id,
     session: freshSession(types[0]),
     history: [],
+    /* Drive eşitlemesi için: silinenler (mezar taşı), ayar zaman damgası, dokunulmamış mı? */
+    sync: { tomb: { h: {}, t: {} }, settingsAt: 0, pristine: true },
   };
 }
 
@@ -274,6 +302,22 @@ const validEnd = (s) =>
   Number.isFinite(Number(s && s.endAt)) && Number(s.endAt) > 0
     ? Number(s.endAt)
     : null;
+
+function normalizeSync(s) {
+  const o = { tomb: { h: {}, t: {} }, settingsAt: 0, pristine: false };
+  if (!s || typeof s !== "object") return o;
+  o.settingsAt = Number(s.settingsAt) > 0 ? Number(s.settingsAt) : 0;
+  o.pristine = !!s.pristine;
+  ["h", "t"].forEach((k) => {
+    const src = s.tomb && s.tomb[k];
+    if (!src || typeof src !== "object") return;
+    Object.keys(src).forEach((id) => {
+      const v = Number(src[id]);
+      if (Number.isFinite(v) && v > 0) o.tomb[k][id] = v;
+    });
+  });
+  return o;
+}
 
 function normalizeState(raw) {
   const d = defaultState();
@@ -310,6 +354,7 @@ function normalizeState(raw) {
         name: String(t.name || "Blok").slice(0, 40),
         emoji: String(t.emoji || "🎯"),
         color: PALETTE.some((c) => c.id === t.color) ? t.color : "indigo",
+        updatedAt: Number(t.updatedAt) > 0 ? Number(t.updatedAt) : 0,
         sets: (Array.isArray(t.sets) && t.sets.length ? t.sets : [{}]).map(
           (s0) => {
             const s = s0 && typeof s0 === "object" ? s0 : {};
@@ -352,6 +397,8 @@ function normalizeState(raw) {
   if (out.history.length > 5000)
     out.history = out.history.sort((a, b) => a.ts - b.ts).slice(-5000);
 
+  out.sync = normalizeSync(raw.sync);
+
   const active = out.types.find((t) => t.id === out.activeTypeId);
   const s = raw.session;
   const okSession =
@@ -377,6 +424,7 @@ function normalizeState(raw) {
 function migrateOld(old) {
   const s = defaultState();
   if (!old || !Array.isArray(old.subjects) || !old.subjects.length) return s;
+  s.sync.pristine = false;
   s.types = old.subjects.map((sub) => ({
     id: String(sub.id || uid()),
     name: String(sub.title || "Blok"),
@@ -440,6 +488,15 @@ const ui = {
 
 let saveWarned = false;
 function save() {
+  if (persist()) scheduleSync();
+}
+
+/* Yalnızca yerel kayıt (bulut eşitlemesini tetiklemez). Eşitlenecek bir şey değiştiyse true döner. */
+function persist() {
+  let changed = false;
+  try {
+    changed = stampChanges();
+  } catch (_) {}
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (_) {
@@ -450,6 +507,7 @@ function save() {
       );
     }
   }
+  return changed;
 }
 
 /* ---- Türetilmiş veriler ---- */
@@ -1066,6 +1124,7 @@ function adoptStoredIfNewer() {
       (a.endAt !== se.endAt || a.setIndex !== se.setIndex || a.mode !== se.mode)
     ) {
       state = normalizeState(st);
+      track = null;
       if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
       applyAppearance();
       refreshAll();
@@ -1241,7 +1300,10 @@ function render(animate = false) {
   else if (ui.view === "blocks") el.innerHTML = blocksHTML();
   else if (ui.view === "history") el.innerHTML = historyHTML();
   else if (ui.view === "stats") el.innerHTML = statsHTML();
-  else el.innerHTML = settingsHTML();
+  else if (ui.view === "settings") el.innerHTML = settingsHTML();
+  else if (ui.view === "privacy") el.innerHTML = privacyHTML();
+  else if (ui.view === "contact") el.innerHTML = contactHTML();
+
   const page = el.firstElementChild;
   if (animate) {
     el.scrollTop = 0;
@@ -1775,6 +1837,7 @@ function settingsHTML() {
     <header class="page-head"><div><h1>Ayarlar</h1><p>Zamanlayıcı davranışını, görünümü ve verilerini yönet.</p></div></header>
 
     <div class="settings-grid">
+      <div class="settings-col">
       <section class="card set-section">
         <span class="card-title">Zamanlayıcı</span>
         <div class="s-row">
@@ -1827,59 +1890,28 @@ function settingsHTML() {
         </div>
       </section>
 
+      </div>
+      <div class="settings-col">
       <section class="card set-section">
-        <span class="card-title">Veri ve yedekleme</span>
-        ${
-          needsBackup()
-            ? `<div class="nag">${
-                s.lastBackup
-                  ? `Son yedeğin ${Math.floor((Date.now() - s.lastBackup) / DAY_MS)} gün önce.`
-                  : "Henüz hiç yedek almadın."
-              } Tarayıcı verileri silinirse kayıtların gider; şimdi bir yedek al.</div>`
-            : ""
-        }
+        <span class="card-title">Google Drive eşitleme</span>
+        <div id="syncBox">${syncBoxHTML()}</div>
+      </section>
+
+      <section class="card set-section">
+        <span class="card-title">Veriler</span>
         <div class="s-row nb">
           <div class="info">
-            <b>Yedek durumu</b>
-            <span>${
-              s.lastBackup
-                ? `Son yedek: ${esc(whenText(s.lastBackup))}`
-                : "Henüz yedek alınmadı."
-            } · ${state.types.length} blok, ${state.history.length} kayıt</span>
+            <b>Kayıtlı veri</b>
+            <span>${state.types.length} blok, ${state.history.length} kayıt · yedekleme Google Drive ile yapılır</span>
           </div>
         </div>
         <div class="data-actions" style="padding-top:4px">
-          <button class="btn primary" data-action="exportData">${I.download} Yedeği indir</button>
-          ${canShareFiles() ? `<button class="btn" data-action="shareData">${I.upload} Paylaş / Dosyalara kaydet</button>` : ""}
-          <button class="btn" data-action="copyData">${I.copy} Panoya kopyala</button>
+          <button class="btn" data-action="exportCSV">${I.download} Geçmişi CSV olarak indir</button>
         </div>
-        <div class="data-actions" style="padding-top:8px">
-          <button class="btn" data-action="importData">${I.upload} Dosyadan yükle</button>
-          <button class="btn" data-action="pasteData">${I.upload} Metinden yükle</button>
-          <button class="btn" data-action="exportCSV">${I.download} Geçmiş (CSV)</button>
-        </div>
-        ${
-          readAuto().length
-            ? `<div class="auto-list">
-                <div class="auto-head">Otomatik yedekler <span>bu cihazda, günde bir · son ${AUTO_KEEP}</span></div>
-                ${readAuto()
-                  .map((a, i) => ({ a, i }))
-                  .reverse()
-                  .map(
-                    ({ a, i }) => `
-                  <div class="auto-row">
-                    <div><b>${esc(whenText(a.at))}</b><span>${a.counts ? `${a.counts.types} blok · ${a.counts.history} kayıt · ${esc(fmtDur(a.counts.minutes))}` : ""}</span></div>
-                    <button class="btn small" data-action="restoreAuto" data-i="${i}">Geri yükle</button>
-                  </div>`,
-                  )
-                  .join("")}
-              </div>`
-            : ""
-        }
         ${
           hasUndo()
             ? `<div class="s-row" style="margin-top:8px">
-                <div class="info"><b>Son işlemi geri al</b><span>İçe aktarma, geçmişi temizleme veya sıfırlamadan önceki duruma dön.</span></div>
+                <div class="info"><b>Son işlemi geri al</b><span>Geçmişi temizleme veya sıfırlamadan önceki duruma dön.</span></div>
                 <button class="btn small" data-action="undoImport">${I.reset} Geri al</button>
               </div>`
             : ""
@@ -1889,16 +1921,162 @@ function settingsHTML() {
           <button class="btn danger small" data-action="clearHist" ${state.history.length ? "" : "disabled"}>Temizle</button>
         </div>
         <div class="s-row">
-          <div class="info"><b>Her şeyi sıfırla</b><span>Tüm veriler silinir ve varsayılan bloklar geri gelir. Otomatik yedekler korunur.</span></div>
+          <div class="info"><b>Her şeyi sıfırla</b><span>Tüm veriler silinir ve varsayılan bloklar geri gelir. Drive'a bağlıysan silme diğer cihazlara da yayılır.</span></div>
           <button class="btn danger small" data-action="resetAll">Sıfırla</button>
         </div>
       </section>
 
       <section class="card set-section">
-        <span class="card-title">Kısayollar</span>
-        <div class="keys">
-          <div><span>Başlat / Duraklat</span><kbd>Boşluk</kbd></div>
-          <div><span>Odaklan · Bloklar · Geçmiş · İstatistik · Ayarlar</span><kbd>1 – 5</kbd></div>
+        <span class="card-title">Yasal Bilgiler & Destek</span>
+        <div class="s-row">
+          <div class="info">
+            <b>Gizlilik Politikası</b>
+            <span>Verilerinizin nasıl saklandığı ve korunduğu hakkında bilgi edinin.</span>
+          </div>
+          <button class="btn small" data-action="nav" data-view="privacy">
+            ${I.shield} Görüntüle
+          </button>
+        </div>
+        <div class="s-row">
+          <div class="info"><b>İletişim ve Destek</b><span>Öneri, geri bildirim veya yardım için bize ulaşın.</span></div>
+          <button class="btn small" data-action="nav" data-view="contact">
+            ${I.mail} İletişim
+          </button>
+        </div>
+      </section>
+
+      <section class="card set-section">
+        <span class="card-title">Uygulama Hakkında</span>
+        
+        <div class="s-row nb" style="padding-top: 8px;">
+          <div class="info">
+            <b>FocusBlock Pro</b>
+            <span>Sürüm 2.0.0</span>
+          </div>
+        </div>
+
+        <p style="font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.5;">
+          Verimli çalışma alışkanlıkları kazanmanız ve odaklanma sürelerinizi yönetmeniz için tasarlanmıştır.
+        </p>
+
+        <!-- Telif Hakkı ve Geliştirici Alt Bilgisi -->
+        <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); line-height: 1.5;">
+          <div>Geliştirici: <strong style="color: var(--text)">Oğuz Batuhan Çözeli</strong></div>
+          <div>© 2026 FocusBlock Pro. Tüm hakları saklıdır.</div>
+        </div>
+      </section>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- GİZLİLİK POLITIKASI SAYFASI ---------- */
+function privacyHTML() {
+  return `
+  <div class="page">
+    <header class="page-head">
+      <div>
+        <button class="btn small" data-action="nav" data-view="settings" style="margin-bottom:8px">
+          ${I.arrowLeft} Ayarlara Dön
+        </button>
+        <h1>Gizlilik Politikası</h1>
+        <p>Gizliliğinize ve kişisel verilerinizin güvenliğine önem veriyoruz.</p>
+      </div>
+    </header>
+
+    <div class="settings-grid">
+      <section class="card set-section wide" style="grid-column: 1 / -1;">
+        <span class="card-title">Veri Gizliliği ve Güvenliği</span>
+        
+        <div style="display:flex; flex-direction:column; gap:16px; font-size:13.5px; line-height:1.6; margin-top:12px;">
+          <div>
+            <b style="display:block; font-size:14px; margin-bottom:4px">1. Verilerin Depolanması</b>
+            <span style="color:var(--muted)">FocusBlock Pro, kullanıcı verilerinin gizliliğini ön planda tutar. Çalışma oturumlarınız, oluşturduğunuz bloklar ve ayarlarınız öncelikli olarak cihazınızın yerel depolama alanında (LocalStorage) saklanır.</span>
+          </div>
+
+          <div>
+            <b style="display:block; font-size:14px; margin-bottom:4px">2. Google Drive Eşitlemesi</b>
+            <span style="color:var(--muted)">Google Drive senkronizasyonunu etkinleştirdiğinizde, verileriniz yalnızca sizin kişisel Google Drive hesabınızdaki gizli uygulama klasörüne ("appDataFolder") yedeklenir. Verileriniz hiçbir şekilde üçüncü taraf sunuculara veya geliştiricilere aktarılmaz.</span>
+          </div>
+
+          <div>
+            <b style="display:block; font-size:14px; margin-bottom:4px">3. Çerezler ve Analitik</b>
+            <span style="color:var(--muted)">Uygulamamız tamamen reklamsızdır. Üçüncü taraf takip çerezleri, reklam kimlikleri veya izleme araçları kullanılmaz.</span>
+          </div>
+
+          <div>
+            <b style="display:block; font-size:14px; margin-bottom:4px">4. Veri Kontrolü ve Silme</b>
+            <span style="color:var(--muted)">Tüm geçmişinizi ve uygulama verilerinizi Ayarlar menüsünden dilediğiniz zaman tek tıkla silebilir veya sıfırlayabilirsiniz.</span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>`;
+}
+
+/* ---------- İLETİŞİM SAYFASI ---------- */
+function contactHTML() {
+  // E-posta konu ve gövde şablonları
+  const supportSubject = encodeURIComponent(
+    "FocusBlock Pro - Destek ve Geri Bildirim",
+  );
+  const supportBody = encodeURIComponent(
+    "Merhaba Oğuz Batuhan,\n\nFocusBlock Pro uygulaması ile ilgili görüş/önerim şu şekildedir:\n\n\n----\nCihaz Bilgisi: " +
+      navigator.userAgent +
+      "\nSürüm: 2.0.0",
+  );
+
+  const donateSubject = encodeURIComponent(
+    "FocusBlock Pro - Proje Destek Talebi",
+  );
+  const donateBody = encodeURIComponent(
+    "Merhaba Oğuz Batuhan,\n\nFocusBlock Pro projesinin gelişimine katkıda bulunmak ve destek olmak istiyorum. Detaylar için dönüş yapabilirseniz sevinirim.\n\nİyi çalışmalar.",
+  );
+
+  return `
+  <div class="page">
+    <header class="page-head">
+      <div>
+        <button class="btn small" data-action="nav" data-view="settings" style="margin-bottom:8px">
+          ${I.arrowLeft} Ayarlara Dön
+        </button>
+        <h1>İletişim ve Destek</h1>
+        <p>Soru, öneri veya geri bildirimleriniz için bizimle iletişime geçebilirsiniz.</p>
+      </div>
+    </header>
+
+    <div class="settings-grid">
+      <section class="card set-section wide" style="grid-column: 1 / -1;">
+        <span class="card-title">Bize Ulaşın & Destek Olun</span>
+        
+        <div class="s-row" style="margin-top: 8px;">
+          <div class="info">
+            <b>E-posta Desteği</b>
+            <span>Geri bildirim, destek talebi ve sorularınız için direkt e-posta gönderebilirsiniz.</span>
+          </div>
+          <a class="btn primary small" href="mailto:cozelioguzbatuhan@gmail.com?subject=${supportSubject}&body=${supportBody}" target="_blank" rel="noopener" style="text-decoration:none">
+            ${I.mail} E-posta Gönder
+          </a>
+        </div>
+
+        <div class="s-row">
+          <div class="info">
+            <b>Geliştirmeye Destek Olun</b>
+            <span>FocusBlock Pro'nun gelişimine katkıda bulunmak ve geliştirme süreçlerini desteklemek için e-posta adresim üzerinden iletişime geçebilirsiniz.</span>
+          </div>
+          <a class="btn small" href="mailto:cozelioguzbatuhan@gmail.com?subject=${donateSubject}&body=${donateBody}" target="_blank" rel="noopener" style="text-decoration:none">
+            ${I.bolt} Destek Ol
+          </a>
+        </div>
+
+        <div class="s-row">
+          <div class="info">
+            <b>GitHub Deposu</b>
+            <span>Proje kodlarını incelemek, kaynak koda katkıda bulunmak veya hata bildirimi (Issue) açmak için.</span>
+          </div>
+          <a class="btn small" href="https://github.com/oguzbatuhan" target="_blank" rel="noopener" style="text-decoration:none">
+            ${I.external} GitHub'da İncele
+          </a>
         </div>
       </section>
     </div>
@@ -1909,7 +2087,6 @@ function settingsHTML() {
    YEDEKLEME
    ========================================================================== */
 const BACKUP_APP = "focusblock-pro";
-const AUTO_KEEP = 5;
 const DAY_MS = 86400000;
 
 function downloadFile(name, text, type) {
@@ -1932,12 +2109,6 @@ const stampName = () => {
   return `${dayKey(d)}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 };
 
-const countsOf = (src) => ({
-  types: src.types.length,
-  history: src.history.length,
-  minutes: src.history.reduce((a, h) => a + h.minutes, 0),
-});
-
 const whenText = (ts) =>
   ts
     ? new Date(ts).toLocaleString("tr-TR", {
@@ -1945,94 +2116,6 @@ const whenText = (ts) =>
         timeStyle: "short",
       })
     : "belirtilmemiş";
-
-function backupData() {
-  return {
-    settings: state.settings,
-    types: state.types,
-    activeTypeId: state.activeTypeId,
-    history: state.history,
-  };
-}
-
-function buildBackup() {
-  const counts = countsOf(state);
-  const payload = {
-    app: BACKUP_APP,
-    version: 3,
-    exportedAt: Date.now(),
-    counts,
-    data: backupData(),
-  };
-  return {
-    json: JSON.stringify(payload, null, 2),
-    name: `focusblock-yedek-${stampName()}.json`,
-    counts,
-  };
-}
-
-function markBackedUp(c) {
-  state.settings.lastBackup = Date.now();
-  save();
-  if (ui.view === "settings") render();
-  toast(`Yedek hazır · ${c.types} blok, ${c.history} kayıt`);
-}
-
-/* Not: yedek almak çalışan zamanlayıcıyı artık durdurmaz */
-function exportBackup() {
-  const b = buildBackup();
-  downloadFile(b.name, b.json, "application/json");
-  markBackedUp(b.counts);
-}
-
-function canShareFiles() {
-  try {
-    return (
-      typeof navigator.canShare === "function" &&
-      navigator.canShare({
-        files: [new File(["{}"], "a.json", { type: "application/json" })],
-      })
-    );
-  } catch (_) {
-    return false;
-  }
-}
-
-async function shareBackup() {
-  const b = buildBackup();
-  try {
-    const file = new File([b.json], b.name, { type: "application/json" });
-    await navigator.share({ files: [file], title: "FocusBlock yedeği" });
-    markBackedUp(b.counts);
-  } catch (err) {
-    if (err && err.name === "AbortError") return;
-    toast("Paylaşım açılamadı; dosya olarak indiriliyor");
-    downloadFile(b.name, b.json, "application/json");
-    markBackedUp(b.counts);
-  }
-}
-
-async function copyBackup() {
-  const b = buildBackup();
-  let ok = false;
-  try {
-    await navigator.clipboard.writeText(b.json);
-    ok = true;
-  } catch (_) {
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = b.json;
-      ta.setAttribute("readonly", "");
-      ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
-      document.body.appendChild(ta);
-      ta.select();
-      ok = document.execCommand("copy");
-      ta.remove();
-    } catch (_) {}
-  }
-  if (ok) markBackedUp(b.counts);
-  else toast("Panoya kopyalanamadı; dosya olarak indirmeyi dene");
-}
 
 function exportCSV() {
   if (!state.history.length) return toast("Dışa aktarılacak geçmiş kaydı yok");
@@ -2066,47 +2149,6 @@ function exportCSV() {
   toast(`${state.history.length} kayıt CSV olarak indirildi`);
 }
 
-/* Yedek dosyasını çöz: yeni biçim, doğrudan durum dosyası ve eski (v1) sürüm desteklenir */
-function parseBackup(text) {
-  let raw;
-  try {
-    raw = JSON.parse(
-      String(text)
-        .replace(/^\uFEFF/, "")
-        .trim(),
-    );
-  } catch (_) {
-    throw new Error(
-      "Geçerli bir JSON değil. Dosyayı/metni tam yapıştırdığından emin ol.",
-    );
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw))
-    throw new Error("İçerik tanınamadı.");
-  let data = raw;
-  let exportedAt = null;
-  let expected = null;
-  if (raw.app === BACKUP_APP && raw.data && typeof raw.data === "object") {
-    data = raw.data;
-    exportedAt = Number(raw.exportedAt) || null;
-    expected = raw.counts && typeof raw.counts === "object" ? raw.counts : null;
-  } else if (raw.app && raw.app !== BACKUP_APP) {
-    throw new Error("Bu, FocusBlock yedeği değil.");
-  }
-  if (Array.isArray(data.subjects) && !Array.isArray(data.types))
-    data = migrateOld(data);
-  if (!Array.isArray(data.types) || !data.types.length)
-    throw new Error("Bu içerikte FocusBlock verisi bulunamadı.");
-  const norm = normalizeState({ ...data, session: null });
-  let warn = "";
-  if (
-    expected &&
-    Number.isFinite(expected.history) &&
-    expected.history !== norm.history.length
-  )
-    warn = `Yedek ${expected.history} kayıt içermeliydi ama ${norm.history.length} kayıt okunabildi; dosya eksik veya bozuk olabilir.`;
-  return { norm, exportedAt, warn };
-}
-
 /* ---- Geri alma (tek seviye) ---- */
 function snapshotForUndo() {
   try {
@@ -2124,13 +2166,11 @@ function undoImport() {
   try {
     const prev = JSON.parse(localStorage.getItem(PREV_KEY));
     if (state.session.running) pauseTimer();
-    const lb = state.settings.lastBackup;
     state = normalizeState(prev.state);
     state.session.running = false;
     state.session.endAt = null;
-    state.settings.lastBackup =
-      Math.max(lb || 0, state.settings.lastBackup || 0) || null;
     localStorage.removeItem(PREV_KEY);
+    track = null;
     ui.selectedTypeId = state.activeTypeId;
     ui.hist.type = "all";
     save();
@@ -2140,173 +2180,6 @@ function undoImport() {
   } catch (_) {
     toast("Geri alınacak bir kayıt bulunamadı");
   }
-}
-
-/* ---- Otomatik yerel yedekler: günde bir, son 5 tanesi bu cihazda saklanır ---- */
-function readAuto() {
-  try {
-    const a = JSON.parse(localStorage.getItem(AUTO_KEY));
-    return Array.isArray(a) ? a : [];
-  } catch (_) {
-    return [];
-  }
-}
-function writeAuto(list) {
-  for (;;) {
-    try {
-      localStorage.setItem(AUTO_KEY, JSON.stringify(list));
-      return true;
-    } catch (_) {
-      if (list.length <= 1) {
-        try {
-          localStorage.removeItem(AUTO_KEY);
-        } catch (_) {}
-        return false;
-      }
-      list = list.slice(1); // yer yoksa en eskiyi at
-    }
-  }
-}
-function autoSnapshot() {
-  if (!state.history.length) return;
-  const list = readAuto();
-  const last = list[list.length - 1];
-  const c = countsOf(state);
-  const sig = `${c.types}:${c.history}:${c.minutes}`;
-  if (last && (dayKey(last.at) === dayKey(Date.now()) || last.sig === sig))
-    return;
-  list.push({ at: Date.now(), sig, counts: c, data: backupData() });
-  writeAuto(list.slice(-AUTO_KEEP));
-}
-
-const needsBackup = () =>
-  state.history.length >= 3 &&
-  (!state.settings.lastBackup ||
-    Date.now() - state.settings.lastBackup > 14 * DAY_MS);
-
-function chooseImportMode(norm, when, warn) {
-  return new Promise((resolve) => {
-    beginModal(resolve);
-    const haveT = new Set(state.types.map((t) => t.id));
-    const haveH = new Set(state.history.map((h) => h.id));
-    const newT = norm.types.filter((t) => !haveT.has(t.id)).length;
-    const newH = norm.history.filter((h) => !haveH.has(h.id)).length;
-    const nc = countsOf(norm);
-    const cc = countsOf(state);
-    openModal(`
-      <h3>Yedek okundu</h3>
-      <p>Yedek tarihi: ${esc(when)}</p>
-      ${warn ? `<p class="warn">⚠️ ${esc(warn)}</p>` : ""}
-      <div class="imp-cmp">
-        <div><span>Yedekte</span><b>${nc.types} blok · ${nc.history} kayıt · ${esc(fmtDur(nc.minutes))}</b></div>
-        <div><span>Bu cihazda</span><b>${cc.types} blok · ${cc.history} kayıt · ${esc(fmtDur(cc.minutes))}</b></div>
-      </div>
-      <p><b>Birleştir:</b> yalnızca eksik olanlar eklenir (${newT} yeni blok, ${newH} yeni kayıt); hiçbir şey silinmez.<br><b>Değiştir:</b> mevcut veri yedektekiyle yer değiştirir. İkisini de Ayarlar'dan geri alabilirsin.</p>
-      <div class="modal-actions col">
-        <button class="btn primary" data-action="impMerge">Birleştir (önerilen)</button>
-        <button class="btn" data-action="impReplace">Mevcut verinin yerine koy</button>
-        <button class="btn ghost" data-action="modalNo">Vazgeç</button>
-      </div>`);
-  });
-}
-
-async function applyBackup(norm, when, warn = "") {
-  const choice = await chooseImportMode(norm, when, warn);
-  if (choice !== "merge" && choice !== "replace") return;
-
-  if (choice === "replace" && state.session.running) pauseTimer();
-  snapshotForUndo();
-
-  if (choice === "replace") {
-    const lb = state.settings.lastBackup;
-    state = norm;
-    state.settings.lastBackup = lb;
-    ui.selectedTypeId = state.activeTypeId;
-    ui.hist.type = "all";
-    applyAppearance();
-    save();
-    refreshAll();
-    return toast(
-      `Yedek yüklendi · ${state.types.length} blok, ${state.history.length} kayıt`,
-    );
-  }
-
-  const haveT = new Set(state.types.map((t) => t.id));
-  const haveH = new Set(state.history.map((h) => h.id));
-  let addedT = 0;
-  let addedH = 0;
-  norm.types.forEach((t) => {
-    if (!haveT.has(t.id)) {
-      state.types.push(t);
-      addedT++;
-    }
-  });
-  norm.history.forEach((h) => {
-    if (!haveH.has(h.id)) {
-      state.history.push(h);
-      addedH++;
-    }
-  });
-  state.history.sort((a, b) => a.ts - b.ts);
-  if (state.history.length > 5000)
-    state.history.splice(0, state.history.length - 5000);
-  save();
-  refreshAll();
-  toast(
-    addedT || addedH
-      ? `${addedT} blok, ${addedH} kayıt eklendi`
-      : "Yedekteki her şey zaten bu cihazda var",
-  );
-}
-
-async function handleImportText(text) {
-  let parsed;
-  try {
-    parsed = parseBackup(text);
-  } catch (err) {
-    return toast(err.message || "Yedek okunamadı");
-  }
-  await applyBackup(parsed.norm, whenText(parsed.exportedAt), parsed.warn);
-}
-
-async function handleImportFile(file) {
-  if (file.size > 20 * 1024 * 1024)
-    return toast("Dosya çok büyük (en fazla 20 MB)");
-  let text;
-  try {
-    text = await file.text();
-  } catch (_) {
-    return toast("Dosya okunamadı");
-  }
-  return handleImportText(text);
-}
-
-async function restoreAuto(i) {
-  const snap = readAuto()[i];
-  if (!snap || !snap.data) return toast("Bu yedek bulunamadı");
-  let norm;
-  try {
-    norm = normalizeState({ ...snap.data, session: null });
-  } catch (_) {
-    return toast("Bu otomatik yedek okunamadı");
-  }
-  await applyBackup(norm, `${whenText(snap.at)} (otomatik yedek)`);
-}
-
-function openPasteModal() {
-  beginModal(null);
-  openModal(`
-    <h3>Metinden geri yükle</h3>
-    <p>“Panoya kopyala” ile aldığın yedek metnini ya da .json dosyasının içeriğini buraya yapıştır.</p>
-    <textarea id="pasteBox" class="input paste-box" rows="7" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Yedek metni buraya yapıştırılır"></textarea>
-    <div class="modal-actions">
-      <button class="btn" data-action="modalNo">Vazgeç</button>
-      <button class="btn primary" data-action="pasteGo">Devam</button>
-    </div>`);
-  setTimeout(() => {
-    const t = $("pasteBox");
-    if (t) t.focus();
-  }, 60);
 }
 
 /* ==========================================================================
@@ -2332,14 +2205,6 @@ document.addEventListener("click", async (e) => {
   }
   if (a === "modalYes") return closeModal(true);
   if (a === "modalNo") return closeModal(false);
-  if (a === "impMerge") return closeModal("merge");
-  if (a === "impReplace") return closeModal("replace");
-  if (a === "pasteGo") {
-    const txt = ($("pasteBox") || {}).value || "";
-    if (!txt.trim()) return toast("Önce yedek metnini yapıştır");
-    closeModal(false);
-    return handleImportText(txt);
-  }
   if (a === "tpl") {
     const t = makeType(TEMPLATES[parseInt(d.i)]);
     state.types.push(t);
@@ -2534,7 +2399,7 @@ document.addEventListener("click", async (e) => {
     case "clearHist": {
       const ok = await confirmDialog(
         "Geçmiş temizlensin mi?",
-        `${state.history.length} kayıt silinecek. Ayarlar'dan geri alabilirsin.`,
+        `${state.history.length} kayıt silinecek${syncMeta.connected ? " (Drive'a bağlı olduğun için diğer cihazlardan da silinir)" : ""}. Ayarlar'dan geri alabilirsin.`,
         "Temizle",
         true,
       );
@@ -2597,16 +2462,12 @@ document.addEventListener("click", async (e) => {
       save();
       applyAppearance();
       return render();
-    case "exportData":
-      return exportBackup();
-    case "shareData":
-      return shareBackup();
-    case "copyData":
-      return copyBackup();
-    case "pasteData":
-      return openPasteModal();
-    case "restoreAuto":
-      return restoreAuto(parseInt(d.i));
+    case "syncConnect":
+      return connectDrive();
+    case "syncNow":
+      return runSync({ interactive: true });
+    case "syncDisconnect":
+      return disconnectDrive();
     case "testNotif": {
       const ok = await showNotification(
         "FocusBlock testi",
@@ -2621,8 +2482,6 @@ document.addEventListener("click", async (e) => {
       return undoImport();
     case "testSound":
       return playSound(d.kind, true);
-    case "importData":
-      return $("importFile").click();
     case "resetAll": {
       const ok = await confirmDialog(
         "Her şey sıfırlansın mı?",
@@ -2636,6 +2495,7 @@ document.addEventListener("click", async (e) => {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(OLD_KEY);
       state = defaultState();
+      track = null;
       ui.selectedTypeId = state.activeTypeId;
       applyAppearance();
       save();
@@ -2684,12 +2544,6 @@ document.addEventListener("change", (e) => {
   refreshTypeList();
 });
 
-$("importFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  e.target.value = "";
-  if (file) await handleImportFile(file);
-});
-
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("modalRoot").innerHTML) return closeModal(false);
   const tag = e.target.tagName;
@@ -2709,7 +2563,6 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     syncWakeLock();
     updateTimerDOM();
-    autoSnapshot();
   }
 });
 window.addEventListener("pageshow", tick);
@@ -2720,6 +2573,7 @@ window.addEventListener("storage", (e) => {
   if (e.key !== STORAGE_KEY || !e.newValue) return;
   try {
     state = normalizeState(JSON.parse(e.newValue));
+    track = null;
     if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
     applyAppearance();
     refreshAll();
@@ -2727,9 +2581,622 @@ window.addEventListener("storage", (e) => {
 });
 
 /* ==========================================================================
+   8. GOOGLE DRIVE EŞİTLEME
+   Veriler kullanıcının kendi Drive hesabındaki gizli "appDataFolder" klasöründe durur.
+   Birleştirme kuralları (iki cihaz aynı anda değişse de veri kaybolmaz):
+   • Geçmiş kayıtları: benzersiz id ile birleştirilir; silinenler "mezar taşı" (tomb) ile yayılır
+   • Bloklar: id ile birleştirilir; aynı blok iki yerde değiştiyse son değiştiren kazanır
+   • Ayarlar (tema, hedef, ses…): son değiştiren kazanır
+   • Çalışan sayaç (oturum) cihaza özeldir, eşitlenmez
+   ========================================================================== */
+const SYNC_FORMAT = "focusblock-sync-v1";
+const SYNC_DEBOUNCE = 3000; // son değişiklikten sonra buluta gönderme gecikmesi
+const SYNC_POLL = 60000; // başka cihazdaki değişiklikleri yoklama aralığı
+const SILENT_COOLDOWN = 15 * 60000; // sessiz yenileme başarısızsa tekrar deneme aralığı
+const TOMB_TTL = 120 * 86400000;
+const TOMB_MAX = 10000;
+
+/* ---- Cihaza özel eşitleme bilgisi (buluta gitmez) ---- */
+function loadSyncMeta() {
+  let m = {};
+  try {
+    m = JSON.parse(localStorage.getItem(SYNC_KEY)) || {};
+  } catch (_) {}
+  return {
+    device: String(m.device || uid()),
+    connected: !!m.connected,
+    email: String(m.email || ""),
+    lastSync: Number(m.lastSync) || 0,
+    remoteMod: String(m.remoteMod || ""),
+  };
+}
+let syncMeta = loadSyncMeta();
+function saveSyncMeta() {
+  try {
+    localStorage.setItem(SYNC_KEY, JSON.stringify(syncMeta));
+  } catch (_) {}
+}
+
+const syncRt = {
+  ready: false, // Google istemcisi hazır mı
+  busy: false,
+  queued: false,
+  dirty: false, // buluta gitmemiş yerel değişiklik var
+  seq: 0,
+  timer: null,
+  needsAuth: false,
+  offline: false,
+  error: "",
+  lastSilentFail: 0,
+  pendingRefresh: false,
+};
+
+/* ---- Değişiklik takibi: düzenleme/silme noktalarına dokunmadan otomatik ---- */
+let track = null;
+
+const typeSig = (t) =>
+  JSON.stringify([
+    t.name,
+    t.emoji,
+    t.color,
+    t.sets.map((s) => [s.title, s.work, s.break]),
+  ]);
+
+const syncSettingsOf = (s) => ({
+  theme: s.theme,
+  accent: s.accent,
+  dailyGoal: s.dailyGoal,
+  autoStart: s.autoStart,
+  sound: s.sound,
+  volume: s.volume,
+});
+const settingsSig = () => JSON.stringify(syncSettingsOf(state.settings));
+
+function snapshotTrack() {
+  return {
+    types: new Map(state.types.map((t) => [t.id, typeSig(t)])),
+    hist: new Set(state.history.map((h) => h.id)),
+    set: settingsSig(),
+  };
+}
+function initSyncTracking() {
+  track = snapshotTrack();
+}
+
+function trimTomb(sy) {
+  const cutoff = Date.now() - TOMB_TTL;
+  ["h", "t"].forEach((k) => {
+    const m = sy.tomb[k];
+    for (const id in m) if (m[id] < cutoff) delete m[id];
+    const ids = Object.keys(m);
+    if (ids.length > TOMB_MAX)
+      ids
+        .sort((a, b) => m[a] - m[b])
+        .slice(0, ids.length - TOMB_MAX)
+        .forEach((id) => delete m[id]);
+  });
+}
+
+/* Son kayıttan bu yana neler değişti? Değişen bloklara zaman damgası, silinenlere mezar taşı koyar.
+   Eşitlenecek bir şey değiştiyse true döner. */
+function stampChanges() {
+  if (!track) {
+    track = snapshotTrack();
+    return false;
+  }
+  const now = Date.now();
+  const sy = state.sync;
+  let changed = false;
+
+  const curT = new Set();
+  state.types.forEach((t) => {
+    curT.add(t.id);
+    if (track.types.get(t.id) !== typeSig(t)) {
+      t.updatedAt = now;
+      changed = true;
+    }
+    if (sy.tomb.t[t.id]) delete sy.tomb.t[t.id]; // geri yüklendi (ör. "Geri al")
+  });
+  track.types.forEach((_, id) => {
+    if (!curT.has(id)) {
+      sy.tomb.t[id] = now;
+      changed = true;
+    }
+  });
+
+  const curH = new Set();
+  state.history.forEach((h) => {
+    curH.add(h.id);
+    if (!track.hist.has(h.id)) changed = true;
+    if (sy.tomb.h[h.id]) delete sy.tomb.h[h.id];
+  });
+  track.hist.forEach((id) => {
+    if (!curH.has(id)) {
+      sy.tomb.h[id] = now;
+      changed = true;
+    }
+  });
+
+  const ss = settingsSig();
+  if (ss !== track.set) {
+    sy.settingsAt = now;
+    changed = true;
+  }
+
+  if (changed) {
+    sy.pristine = false;
+    trimTomb(sy);
+  }
+  track = {
+    types: new Map(state.types.map((t) => [t.id, typeSig(t)])),
+    hist: curH,
+    set: ss,
+  };
+  return changed;
+}
+
+/* ---- Bulut dosyası: oluşturma, okuma, karşılaştırma ---- */
+function buildSyncPayload() {
+  return {
+    app: BACKUP_APP,
+    format: SYNC_FORMAT,
+    savedAt: Date.now(),
+    device: syncMeta.device,
+    settings: syncSettingsOf(state.settings),
+    settingsAt: state.sync.settingsAt || 0,
+    types: state.types,
+    history: state.history,
+    tomb: state.sync.tomb,
+  };
+}
+
+function parseRemote(raw) {
+  const bad = () =>
+    new SyncError(
+      "format",
+      "Drive'daki eşitleme dosyası tanınamadı; güvenlik için üzerine yazılmadı",
+    );
+  if (
+    !raw ||
+    typeof raw !== "object" ||
+    raw.app !== BACKUP_APP ||
+    raw.format !== SYNC_FORMAT ||
+    !Array.isArray(raw.types) ||
+    !Array.isArray(raw.history)
+  )
+    throw bad();
+  const rawIds = new Set(raw.types.map((t) => t && String(t.id)));
+  const ns = normalizeState({
+    types: raw.types,
+    history: raw.history,
+    settings: raw.settings,
+    session: null,
+  });
+  const types = raw.types.length ? ns.types : [];
+  if (types.some((t) => !rawIds.has(t.id))) throw bad();
+  const sy = normalizeSync({ tomb: raw.tomb, settingsAt: raw.settingsAt });
+  return {
+    types,
+    history: ns.history,
+    settings: syncSettingsOf(ns.settings),
+    settingsAt: sy.settingsAt,
+    tomb: sy.tomb,
+  };
+}
+
+/* İki durumun eşit olup olmadığını anlamak için kararlı bir imza (sıra ve anahtar sırasından bağımsız) */
+function syncSig(p) {
+  const T = (t) => [
+    t.id,
+    t.name,
+    t.emoji,
+    t.color,
+    t.updatedAt || 0,
+    t.sets.map((s) => [s.id, s.title, s.work, s.break]),
+  ];
+  const H = (h) => [
+    h.id,
+    h.ts,
+    h.typeId,
+    h.typeName,
+    h.emoji,
+    h.color,
+    h.setNo,
+    h.setTitle,
+    h.minutes,
+    h.status,
+  ];
+  const byId = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  const M = (m) =>
+    Object.keys(m)
+      .sort()
+      .map((k) => k + ":" + m[k])
+      .join(",");
+  const s = p.settings;
+  return JSON.stringify([
+    [s.theme, s.accent, s.dailyGoal, s.autoStart, s.sound, s.volume],
+    p.settingsAt || 0,
+    p.types.map(T).sort(byId),
+    p.history.map(H).sort(byId),
+    M(p.tomb.h),
+    M(p.tomb.t),
+  ]);
+}
+
+/* İlk eşitlemede iki cihazda aynı içerikli ama farklı id'li bloklar (ör. varsayılanlar) çoğalmasın */
+function dedupeLocalTypes(remote) {
+  const rIds = new Set(remote.types.map((t) => t.id));
+  const bySig = new Map(remote.types.map((t) => [typeSig(t), t.id]));
+  const idMap = {};
+  state.types = state.types.filter((t) => {
+    if (rIds.has(t.id)) return true;
+    const to = bySig.get(typeSig(t));
+    if (!to) return true;
+    idMap[t.id] = to;
+    return false;
+  });
+  if (!Object.keys(idMap).length) return;
+  state.history.forEach((h) => {
+    if (idMap[h.typeId]) h.typeId = idMap[h.typeId];
+  });
+  if (idMap[state.activeTypeId]) state.activeTypeId = idMap[state.activeTypeId];
+}
+
+/* Bulut verisini yerel duruma birleştirir (aynı olay iki kez gelse bile sonuç değişmez) */
+function mergeRemote(remote) {
+  const sy = state.sync;
+  const firstSync = !syncMeta.lastSync;
+
+  ["h", "t"].forEach((k) => {
+    for (const id in remote.tomb[k])
+      sy.tomb[k][id] = Math.max(sy.tomb[k][id] || 0, remote.tomb[k][id]);
+  });
+
+  const se = state.session;
+  const fullBefore =
+    !se.running && se.mode !== "done" && se.remaining === phaseTotal();
+
+  let types;
+  let history;
+  if (sy.pristine && remote.types.length) {
+    /* Bu cihaz yeni/dokunulmamış: varsayılan blokları bırak, bulutaki veriyi al */
+    types = remote.types.slice();
+    history = remote.history.slice();
+  } else {
+    if (firstSync) dedupeLocalTypes(remote);
+    const tm = new Map(state.types.map((t) => [t.id, t]));
+    remote.types.forEach((r) => {
+      const l = tm.get(r.id);
+      if (!l || (r.updatedAt || 0) > (l.updatedAt || 0)) tm.set(r.id, r);
+    });
+    types = [...tm.values()];
+    const hm = new Map(state.history.map((h) => [h.id, h]));
+    remote.history.forEach((h) => {
+      if (!hm.has(h.id)) hm.set(h.id, h);
+    });
+    history = [...hm.values()];
+  }
+
+  /* Silinenleri ayıkla (silindikten sonra düzenlenen blok korunur) */
+  types = types.filter((t) => {
+    const at = sy.tomb.t[t.id];
+    if (!at) return true;
+    if ((t.updatedAt || 0) > at) {
+      delete sy.tomb.t[t.id];
+      return true;
+    }
+    return false;
+  });
+  history = history
+    .filter((h) => !sy.tomb.h[h.id])
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-5000);
+
+  state.types = types.length ? types : defaultTypes();
+  state.history = history;
+
+  if (remote.settingsAt > (sy.settingsAt || 0)) {
+    Object.assign(state.settings, remote.settings);
+    sy.settingsAt = remote.settingsAt;
+  }
+  sy.pristine = false;
+  trimTomb(sy);
+
+  /* Oturumu yeni bloklarla tutarlı tut */
+  if (!typeById(state.activeTypeId)) {
+    state.activeTypeId = state.types[0].id;
+    state.session = freshSession(curType());
+  } else {
+    const s2 = state.session;
+    const n = curType().sets.length;
+    if (s2.setIndex > n - 1) {
+      s2.setIndex = n - 1;
+      if (!s2.running) {
+        s2.mode = "work";
+        s2.remaining = curSet().work * 60;
+      }
+    }
+    if (!s2.running && s2.mode !== "done") {
+      s2.remaining = fullBefore
+        ? phaseTotal()
+        : Math.min(s2.remaining, phaseTotal());
+    }
+  }
+  if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
+  if (ui.hist.type !== "all" && !typeById(ui.hist.type)) ui.hist.type = "all";
+
+  track = null; // buluttan gelenler "yerel değişiklik" sayılmasın
+  persist();
+}
+
+/* ---- Eşitleme döngüsü ---- */
+function scheduleSync() {
+  if (!syncMeta.connected) return;
+  syncRt.seq++;
+  syncRt.dirty = true;
+  clearTimeout(syncRt.timer);
+  syncRt.timer = setTimeout(() => runSync(), SYNC_DEBOUNCE);
+}
+
+async function tryInitGoogle() {
+  if (syncRt.ready) return true;
+  try {
+    syncRt.ready = await initGoogleAuth();
+  } catch (_) {
+    syncRt.ready = false;
+  }
+  return syncRt.ready;
+}
+
+function handleSyncError(err, interactive) {
+  const code = err && err.code;
+  const msg = (err && err.message) || "Eşitleme başarısız";
+  if (code === "auth" || code === "scope") {
+    syncRt.needsAuth = true;
+    syncRt.lastSilentFail = Date.now();
+    if (interactive) {
+      syncRt.error = msg;
+      toast(msg);
+    }
+  } else if (code === "network") {
+    syncRt.offline = true;
+  } else {
+    syncRt.error = msg;
+    if (interactive) toast(msg);
+  }
+  console.error("Drive eşitleme:", err);
+}
+
+function refreshAfterSync() {
+  applyAppearance();
+  renderShellState();
+  const a = document.activeElement;
+  if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && $("view").contains(a)) {
+    syncRt.pendingRefresh = true; // yazarken ekranı bozma; odak bırakılınca yenile
+    return;
+  }
+  refreshAll();
+}
+
+async function runSync({ interactive = false } = {}) {
+  if (!syncMeta.connected) return;
+  if (syncRt.busy) {
+    syncRt.queued = true;
+    return;
+  }
+  if (
+    !interactive &&
+    syncRt.needsAuth &&
+    Date.now() - syncRt.lastSilentFail < SILENT_COOLDOWN
+  )
+    return;
+
+  syncRt.busy = true;
+  syncRt.error = "";
+  syncRt.offline = false;
+  updateSyncUI();
+  const seq = syncRt.seq;
+  const auth = { interactive, hint: syncMeta.email || undefined };
+  let changedLocal = false;
+
+  try {
+    if (!syncRt.ready && !(await tryInitGoogle()))
+      throw new SyncError("network", "Google servisine ulaşılamadı");
+    try {
+      stampChanges();
+    } catch (_) {}
+
+    const file = await findSyncFile(auth);
+    const mustCheck =
+      interactive ||
+      syncRt.dirty ||
+      !syncMeta.lastSync ||
+      !file ||
+      file.modifiedTime !== syncMeta.remoteMod;
+
+    if (mustCheck) {
+      let remote = null;
+      let remoteSig = "";
+      let before = "";
+      if (file) {
+        remote = parseRemote(await downloadDriveFile(file.id, auth));
+        remoteSig = syncSig(remote);
+        before = syncSig(buildSyncPayload());
+        mergeRemote(remote); // indirme ile birleştirme arasında await yok → tutarlı
+      }
+      const payload = buildSyncPayload();
+      changedLocal = !!remote && syncSig(payload) !== before;
+      if (!remote || syncSig(payload) !== remoteSig) {
+        const up = await uploadFile(payload, file ? file.id : null, auth);
+        syncMeta.remoteMod = (up && up.modifiedTime) || "";
+      } else {
+        syncMeta.remoteMod = file.modifiedTime || "";
+      }
+    }
+
+    if (state.sync.pristine) {
+      state.sync.pristine = false;
+      persist();
+    }
+    syncMeta.lastSync = Date.now();
+    saveSyncMeta();
+    syncRt.needsAuth = false;
+    if (syncRt.seq === seq) syncRt.dirty = false;
+    else scheduleSync(); // eşitlerken yeni değişiklik olduysa tekrar
+
+    if (changedLocal) {
+      refreshAfterSync();
+      toast("Drive'daki değişiklikler bu cihaza eklendi");
+    } else if (interactive) {
+      toast("Google Drive ile eşitlendi");
+    }
+  } catch (err) {
+    handleSyncError(err, interactive);
+  } finally {
+    syncRt.busy = false;
+    updateSyncUI();
+    if (syncRt.queued) {
+      syncRt.queued = false;
+      setTimeout(() => runSync(), 300);
+    }
+  }
+}
+
+async function connectDrive() {
+  if (syncRt.busy) return;
+  if (!syncRt.ready && !(await tryInitGoogle()))
+    return toast(
+      "Google servisine ulaşılamadı; bağlantını kontrol edip tekrar dene",
+    );
+  try {
+    await requestToken({
+      interactive: true,
+      hint: syncMeta.email || undefined,
+    });
+  } catch (err) {
+    syncRt.error = err.message || "Bağlanılamadı";
+    updateSyncUI();
+    return toast(syncRt.error);
+  }
+  syncMeta.connected = true;
+  syncRt.needsAuth = false;
+  syncRt.error = "";
+  saveSyncMeta();
+  updateSyncUI();
+  getAccountEmail({ interactive: false })
+    .then((email) => {
+      if (!email) return;
+      syncMeta.email = email;
+      saveSyncMeta();
+      updateSyncUI();
+    })
+    .catch(() => {});
+  await runSync({ interactive: true });
+}
+
+async function disconnectDrive() {
+  const ok = await confirmDialog(
+    "Google Drive bağlantısı kesilsin mi?",
+    "Bu cihazdaki verilerin yerinde kalır; Drive'daki yedek de silinmez. İstediğin zaman yeniden bağlanabilirsin.",
+    "Bağlantıyı kes",
+    true,
+  );
+  if (!ok) return;
+  clearTimeout(syncRt.timer);
+  syncMeta.connected = false;
+  syncMeta.email = "";
+  syncMeta.lastSync = 0;
+  syncMeta.remoteMod = "";
+  saveSyncMeta();
+  syncRt.needsAuth = false;
+  syncRt.error = "";
+  syncRt.dirty = false;
+  syncRt.offline = false;
+  try {
+    await signOutGoogle();
+  } catch (_) {}
+  updateSyncUI();
+  toast("Google Drive bağlantısı kesildi");
+}
+
+/* ---- Arayüz ---- */
+function syncStatusText() {
+  if (!syncMeta.connected)
+    return "Bağlı değil · verilerini cihazlar arasında eşitle ve Drive'da yedekle";
+  if (syncRt.busy) return "Eşitleniyor…";
+  if (syncRt.needsAuth) return "Oturum süresi doldu · yeniden bağlan";
+  if (syncRt.error) return syncRt.error;
+  if (syncRt.offline) return "Çevrimdışı · bağlantı gelince eşitlenecek";
+  if (syncMeta.lastSync) return `Eşitlendi · ${whenText(syncMeta.lastSync)}`;
+  return "Hazırlanıyor…";
+}
+
+function syncBoxHTML() {
+  const m = syncMeta;
+  const reconnect = m.connected && syncRt.needsAuth;
+  const actions = !m.connected
+    ? `<button class="btn primary" data-action="syncConnect">${I.cloud} Google Drive ile eşitle</button>`
+    : `<button class="btn primary" data-action="${reconnect ? "syncConnect" : "syncNow"}" ${syncRt.busy ? "disabled" : ""}>
+         <span class="${syncRt.busy ? "spin" : "ico-wrap"}">${I.sync}</span> ${reconnect ? "Yeniden bağlan" : "Şimdi eşitle"}
+       </button>
+       <button class="btn danger" data-action="syncDisconnect">Bağlantıyı kes</button>`;
+  return `
+    <div class="s-row nb">
+      <div class="info">
+        <b>${m.connected ? "Google Drive bağlı" : "Google Drive ile eşitle"}</b>
+        <span>${esc(syncStatusText())}</span>
+        ${m.connected && m.email ? `<span>Hesap: ${esc(m.email)}</span>` : ""}
+      </div>
+    </div>
+    <div class="data-actions" style="padding-top:4px">${actions}</div>
+    <p class="sync-note">Verilerin yalnızca senin Drive hesabındaki uygulamaya özel gizli klasörde saklanır; Drive'da görünmez ve başka uygulamalar erişemez. Bloklar, geçmiş ve ayarlar cihazlar arasında birleştirilir, hiçbir kayıt ezilmez. Çalışan sayaç her cihaza özeldir.</p>`;
+}
+
+function updateSyncUI() {
+  const b = $("syncBox");
+  if (b) b.innerHTML = syncBoxHTML();
+}
+
+function startSync() {
+  tryInitGoogle().then((ok) => {
+    if (ok && syncMeta.connected) runSync(); // sessiz yenileme + eşitleme
+    updateSyncUI();
+  });
+
+  let vt = null;
+  document.addEventListener("visibilitychange", () => {
+    if (!syncMeta.connected) return;
+    clearTimeout(vt);
+    if (document.hidden) {
+      if (syncRt.dirty) {
+        clearTimeout(syncRt.timer);
+        runSync(); // arka plana geçerken bekleyen değişiklikleri hemen gönder
+      }
+    } else {
+      vt = setTimeout(() => runSync(), 400);
+    }
+  });
+  window.addEventListener("online", () => syncMeta.connected && runSync());
+  setInterval(() => {
+    if (syncMeta.connected && !document.hidden) runSync();
+  }, SYNC_POLL);
+
+  document.addEventListener("focusout", () => {
+    if (!syncRt.pendingRefresh) return;
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName)) return;
+      syncRt.pendingRefresh = false;
+      refreshAll();
+    }, 80);
+  });
+}
+
+/* ==========================================================================
    7. BAŞLANGIÇ
    ========================================================================== */
 (function init() {
+  initSyncTracking();
   applyAppearance();
   buildShell();
   /* Ses motoru ilk dokunuşta hazırlansın (otomatik başlayan aşamalarda da ses çıksın) */
@@ -2752,19 +3219,8 @@ window.addEventListener("storage", (e) => {
   renderShellState();
   render(true);
   startTicker();
-  autoSnapshot();
   /* "Kalan / tahmini bitiş" değerleri dakikada bir tazelensin (duraklatılmışken de) */
   setInterval(() => ui.view === "focus" && updateTimerDOM(), 15000);
 
-  /* Günde en fazla bir kez yedek hatırlatması */
-  try {
-    const today = dayKey(new Date());
-    if (needsBackup() && localStorage.getItem(NAG_KEY) !== today) {
-      localStorage.setItem(NAG_KEY, today);
-      setTimeout(
-        () => toast("Bir süredir yedek almadın · Ayarlar → Veri ve yedekleme"),
-        2500,
-      );
-    }
-  } catch (_) {}
+  startSync();
 })();

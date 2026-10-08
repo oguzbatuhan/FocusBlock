@@ -2200,3 +2200,38 @@ kbd {
   white-space: nowrap;
   flex: none;
 }
+
+/* ==========================================================================
+   GOOGLE DRIVE EŞİTLEME
+   ========================================================================== */
+.sync-note {
+  margin-top: 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  font-weight: 500;
+}
+.ico-wrap,
+.spin {
+  display: inline-flex;
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.btn:disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Ayarlar: iki düzgün sütun (kartlar boşluk bırakmadan alt alta dizilir) */
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
