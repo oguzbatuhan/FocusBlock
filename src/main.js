@@ -644,82 +644,104 @@ function getAudio() {
   return audio;
 }
 
-/* Bir "çan" notası: temel ses + üst harmonikler, her biri farklı hızda sönüyor */
-function bell(a, freq, at, dur, vel) {
+/* Zengin çan / pluck: temel + inharmonic kısmi tonlar, yumuşak zarf, hafif FM ışıltısı */
+function tone(a, freq, at, dur, vel, opts = {}) {
   const { ctx, dry, send } = a;
-  const partials = [
-    [1, 1, 1],
-    [2, 0.28, 0.55],
-    [3.01, 0.09, 0.3],
-    [4.97, 0.03, 0.18],
-  ];
+  const {
+    partials = [
+      [1, 1, 1],
+      [2.01, 0.32, 0.55],
+      [3.0, 0.12, 0.32],
+      [4.96, 0.05, 0.2],
+      [6.1, 0.02, 0.12],
+    ],
+    attack = 0.014,
+    bright = 1,
+  } = opts;
   partials.forEach(([mult, amp, decayMul]) => {
     const o = ctx.createOscillator();
     const g = ctx.createGain();
+    const filt = ctx.createBiquadFilter();
     o.type = "sine";
-    o.frequency.value = freq * mult;
-    o.detune.value = (Math.random() - 0.5) * 6;
-    const end = at + dur * decayMul;
-    g.gain.setValueAtTime(0.0001, at);
-    g.gain.exponentialRampToValueAtTime(
-      Math.max(0.0002, vel * amp),
-      at + 0.012,
+    o.frequency.setValueAtTime(freq * mult, at);
+    o.detune.value = (Math.random() - 0.5) * 8;
+    filt.type = "lowpass";
+    filt.frequency.setValueAtTime(
+      Math.min(12000, freq * mult * 4 * bright + 800),
+      at,
     );
+    filt.frequency.exponentialRampToValueAtTime(
+      Math.max(200, freq * mult * 0.8),
+      at + dur * decayMul,
+    );
+    filt.Q.value = 0.7;
+    const end = at + dur * decayMul;
+    const peak = Math.max(0.0002, vel * amp);
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(peak, at + attack);
     g.gain.exponentialRampToValueAtTime(0.0001, end);
-    o.connect(g);
+    o.connect(filt);
+    filt.connect(g);
     g.connect(dry);
     g.connect(send);
     o.start(at);
-    o.stop(end + 0.05);
+    o.stop(end + 0.04);
   });
 }
 
+/* Anlamlı, birbirinden ayırt edilebilir tınılar */
 const SOUNDS = {
+  /* Başlat: yükselen iki not — kararlı, motive edici */
   start: {
     notes: [
-      [392.0, 0],
-      [587.33, 0.09],
+      [329.63, 0, 0.9], // E4
+      [493.88, 0.11, 1.05], // B4
     ],
-    dur: 0.9,
-    vel: 0.28,
+    vel: 0.3,
+    bright: 1.05,
   },
+  /* Duraklat: alçalan, yumuşak kapanış */
   pause: {
     notes: [
-      [587.33, 0],
-      [392.0, 0.08],
+      [493.88, 0, 0.7],
+      [329.63, 0.1, 0.85],
     ],
-    dur: 0.7,
-    vel: 0.2,
+    vel: 0.22,
+    bright: 0.85,
   },
+  /* Mola: ferah, sakin üçlü iniş */
   break: {
     notes: [
-      [783.99, 0],
-      [659.25, 0.15],
-      [523.25, 0.3],
+      [659.25, 0, 1.1], // E5
+      [523.25, 0.18, 1.25], // C5
+      [392.0, 0.36, 1.5], // G4
     ],
-    dur: 1.6,
-    vel: 0.3,
+    vel: 0.28,
+    bright: 0.95,
   },
+  /* Odak (moladan dönüş): net yükselen arpej */
   focus: {
     notes: [
-      [523.25, 0],
-      [659.25, 0.1],
-      [783.99, 0.2],
-      [1046.5, 0.3],
+      [392.0, 0, 0.95],
+      [493.88, 0.12, 1.0],
+      [587.33, 0.24, 1.05],
+      [783.99, 0.36, 1.2],
     ],
-    dur: 1.3,
-    vel: 0.28,
+    vel: 0.3,
+    bright: 1.1,
   },
+  /* Blok tamam: coşkulu, çözümlü kadans + hafif koro */
   done: {
     notes: [
-      [523.25, 0],
-      [659.25, 0.12],
-      [783.99, 0.24],
-      [987.77, 0.36],
-      [1318.51, 0.5],
+      [392.0, 0, 1.4],
+      [493.88, 0.14, 1.5],
+      [587.33, 0.28, 1.6],
+      [783.99, 0.42, 1.8],
+      [987.77, 0.58, 2.1],
     ],
-    dur: 2.6,
-    vel: 0.3,
+    vel: 0.32,
+    bright: 1.15,
+    chorus: [523.25, 659.25, 783.99],
   },
 };
 
@@ -730,16 +752,23 @@ function playSound(kind, force = false) {
   if (!def || vol === 0) return;
   const a = getAudio();
   if (!a) return;
-  a.master.gain.value = Math.pow(vol, 1.6) * 1.4;
-  const t0 = a.ctx.currentTime + 0.03;
-  def.notes.forEach(([f, off], i) => {
+  a.master.gain.value = Math.pow(vol, 1.5) * 1.25;
+  const t0 = a.ctx.currentTime + 0.025;
+  def.notes.forEach(([f, off, dur], i) => {
     const last = kind === "done" && i === def.notes.length - 1;
-    bell(a, f, t0 + off, def.dur, def.vel * (last ? 1.25 : 1));
+    tone(a, f, t0 + off, dur || 1, def.vel * (last ? 1.2 : 1), {
+      bright: def.bright || 1,
+      attack: kind === "pause" ? 0.02 : 0.012,
+    });
   });
-  if (kind === "done")
-    [523.25, 659.25, 783.99].forEach((f) =>
-      bell(a, f, t0 + 0.5, def.dur, def.vel * 0.45),
+  if (def.chorus) {
+    def.chorus.forEach((f, i) =>
+      tone(a, f, t0 + 0.55 + i * 0.04, 1.8, def.vel * 0.38, {
+        bright: 0.9,
+        attack: 0.03,
+      }),
     );
+  }
 }
 
 /* ---- Bildirim: Android Chrome "new Notification" desteklemez; Service Worker üzerinden gösterilir ---- */
@@ -1662,13 +1691,31 @@ function statsHTML() {
   const mMap = minutesByDay();
   const today = startOfDay();
 
+  let span = days;
+  if (span === 0) {
+    const keys = Object.keys(mMap).sort();
+    if (keys.length) {
+      const first = new Date(keys[0] + "T12:00:00");
+      span = Math.max(
+        7,
+        Math.round((today - startOfDay(first)) / 86400000) + 1,
+      );
+    } else {
+      span = 30;
+    }
+    span = Math.min(span, 730); /* grafik için üst sınır */
+  }
+
   const list = [];
-  for (let i = days - 1; i >= 0; i--) {
+  for (let i = span - 1; i >= 0; i--) {
     const d = addDays(today, -i);
     list.push({ d, key: dayKey(d), min: mMap[dayKey(d)] || 0 });
   }
-  const from = list[0].d.getTime();
-  const inRange = state.history.filter((h) => h.ts >= from);
+  const from = days === 0 ? 0 : list[0].d.getTime();
+  const inRange =
+    days === 0
+      ? state.history.slice()
+      : state.history.filter((h) => h.ts >= from);
 
   const total = list.reduce((a, x) => a + x.min, 0);
   const activeDays = list.filter((x) => x.min > 0).length;
@@ -1684,10 +1731,20 @@ function statsHTML() {
   const bars = list
     .map((x, i) => {
       let lb = "";
-      if (days === 7) lb = wd[x.d.getDay()];
-      else if (days === 30)
-        lb = i % 5 === 0 || i === days - 1 ? String(x.d.getDate()) : "";
-      else lb = i % 15 === 0 ? `${x.d.getDate()}/${x.d.getMonth() + 1}` : "";
+      const n = list.length;
+      if (n <= 7) lb = wd[x.d.getDay()];
+      else if (n <= 31)
+        lb = i % 5 === 0 || i === n - 1 ? String(x.d.getDate()) : "";
+      else if (n <= 100)
+        lb =
+          i % 14 === 0 || i === n - 1
+            ? `${x.d.getDate()}/${x.d.getMonth() + 1}`
+            : "";
+      else
+        lb =
+          i % 30 === 0 || i === n - 1
+            ? `${x.d.getMonth() + 1}/${String(x.d.getFullYear()).slice(2)}`
+            : "";
       const h = x.min > 0 ? Math.max(4, Math.round((x.min / maxV) * H)) : 3;
       return `<div class="col" title="${esc(dayLabel(x.key))}: ${fmtDur(x.min)}" data-action="tip" data-tip="${esc(dayLabel(x.key))}: ${fmtDur(x.min)}">
         <div class="b ${x.min === 0 ? "zero" : x.min >= goal ? "hit" : ""}" style="height:${h}px"></div>
@@ -1710,22 +1767,86 @@ function statsHTML() {
     .sort((a, b) => b.v - a.v);
   const distTotal = distList.reduce((a, x) => a + x.v, 0);
 
-  /* Isı haritası (son 16 hafta) */
-  const weeks = 16;
-  const dow = (today.getDay() + 6) % 7;
-  const hStart = addDays(today, -dow - 7 * (weeks - 1));
+  /* Isı haritası — GitHub katkı grafiği tarzı (yıl / aylar, veri aralığına göre) */
+  const allKeys = Object.keys(mMap)
+    .filter((k) => mMap[k] > 0)
+    .sort();
+  let heatFirst = allKeys.length
+    ? new Date(allKeys[0] + "T12:00:00")
+    : addDays(today, -364);
+  /* En az 12 hafta, en fazla ~2 yıl; Pazartesi hizalı başlangıç */
+  const minStart = addDays(today, -7 * 104);
+  if (heatFirst < minStart) heatFirst = minStart;
+  const heatDow = (heatFirst.getDay() + 6) % 7;
+  heatFirst = addDays(heatFirst, -heatDow);
+  const endDow = (today.getDay() + 6) % 7;
+  const heatEnd = addDays(today, 6 - endDow); /* haftanın sonuna tamamla */
+  const totalDays = Math.round((heatEnd - heatFirst) / 86400000) + 1;
+  const weeks = Math.ceil(totalDays / 7);
+
+  const monthNames = [
+    "Oca",
+    "Şub",
+    "Mar",
+    "Nis",
+    "May",
+    "Haz",
+    "Tem",
+    "Ağu",
+    "Eyl",
+    "Eki",
+    "Kas",
+    "Ara",
+  ];
   let cells = "";
+  let monthLabels = [];
+  let lastMonthKey = "";
   for (let i = 0; i < weeks * 7; i++) {
-    const d = addDays(hStart, i);
-    if (d > today) {
-      cells += '<div class="cell off"></div>';
-      continue;
+    const d = addDays(heatFirst, i);
+    const key = dayKey(d);
+    const isFuture = d > today;
+    const m = isFuture ? 0 : mMap[key] || 0;
+    const lvl = isFuture
+      ? -1
+      : m <= 0
+        ? 0
+        : m < goal * 0.25
+          ? 1
+          : m < goal * 0.5
+            ? 2
+            : m < goal
+              ? 3
+              : 4;
+    if (i % 7 === 0) {
+      const mk = `${d.getFullYear()}-${d.getMonth()}`;
+      if (mk !== lastMonthKey && d.getDate() <= 7) {
+        lastMonthKey = mk;
+        monthLabels.push({
+          week: Math.floor(i / 7),
+          label:
+            d.getMonth() === 0
+              ? `${monthNames[0]} ${d.getFullYear()}`
+              : monthNames[d.getMonth()],
+        });
+      } else {
+        monthLabels.push({ week: Math.floor(i / 7), label: "" });
+      }
     }
-    const m = mMap[dayKey(d)] || 0;
-    const lvl =
-      m <= 0 ? 0 : m < goal * 0.25 ? 1 : m < goal * 0.5 ? 2 : m < goal ? 3 : 4;
-    cells += `<div class="cell ${lvl ? "l" + lvl : ""}" title="${esc(dayLabel(dayKey(d)))}: ${fmtDur(m)}" data-action="tip" data-tip="${esc(dayLabel(dayKey(d)))}: ${fmtDur(m)}"></div>`;
+    const tip = isFuture ? "" : `${esc(dayLabel(key))}: ${fmtDur(m)}`;
+    cells += `<div class="cell ${lvl < 0 ? "off" : lvl ? "l" + lvl : ""}" ${tip ? `title="${tip}" data-action="tip" data-tip="${tip}"` : ""}></div>`;
   }
+  const monthRow = monthLabels
+    .map(
+      (x) =>
+        `<span class="heat-month" style="grid-column:${x.week + 1}">${x.label}</span>`,
+    )
+    .join("");
+  const heatTitle =
+    weeks <= 16
+      ? `Son ${weeks} hafta`
+      : weeks <= 53
+        ? "Son 1 yıl"
+        : `Son ${Math.round(weeks / 52)} yıl`;
 
   /* Ritim: saat & haftanın günü */
   const hours = Array(24).fill(0);
@@ -1757,14 +1878,16 @@ function statsHTML() {
     "Pazar",
   ];
 
-  const ranges = [7, 30, 90];
+  const ranges = [7, 30, 90, 365, 0];
+  const rangeLabel = (r) =>
+    r === 0 ? "Tümü" : r === 365 ? "Son 1 yıl" : `Son ${r} gün`;
 
   return `
   <div class="page">
     <header class="page-head">
       <div><h1>İstatistik</h1><p>Çalışma alışkanlıklarını ve ilerlemeni detaylı incele.</p></div>
       <div class="chips">
-        ${ranges.map((r) => `<button class="chip ${days === r ? "active" : ""}" data-action="sRange" data-id="${r}">Son ${r} gün</button>`).join("")}
+        ${ranges.map((r) => `<button class="chip ${days === r ? "active" : ""}" data-action="sRange" data-id="${r}">${rangeLabel(r)}</button>`).join("")}
       </div>
     </header>
 
@@ -1780,7 +1903,7 @@ function statsHTML() {
     <div class="stats-grid">
       <section class="card wide">
         <div class="card-head"><span class="card-title">Günlük odak süresi</span></div>
-        <div class="chart ${days > 45 ? "dense" : ""}">
+        <div class="chart ${list.length > 45 ? "dense" : ""}">
           <div class="goal-line" style="bottom:${goalBottom}px"><span>Hedef ${fmtDur(goal)}</span></div>
           ${bars}
         </div>
@@ -1816,10 +1939,13 @@ function statsHTML() {
       </section>
 
       <section class="card wide">
-        <div class="card-head"><span class="card-title">Son 16 hafta</span></div>
-        <div class="heat-wrap">
-          <div class="heat-days"><span>Pzt</span><span></span><span>Çar</span><span></span><span>Cum</span><span></span><span>Paz</span></div>
-          <div class="heat">${cells}</div>
+        <div class="card-head"><span class="card-title">Aktivite · ${heatTitle}</span></div>
+        <div class="heat-wrap gh" style="--weeks:${weeks}">
+          <div class="heat-months">${monthRow}</div>
+          <div class="heat-body">
+            <div class="heat-days"><span>Pzt</span><span></span><span>Çar</span><span></span><span>Cum</span><span></span><span>Paz</span></div>
+            <div class="heat">${cells}</div>
+          </div>
         </div>
         <div class="legend"><span>Az</span><span class="cell" style="display:inline-block"></span><span class="cell l1" style="display:inline-block"></span><span class="cell l2" style="display:inline-block"></span><span class="cell l3" style="display:inline-block"></span><span class="cell l4" style="display:inline-block"></span><span>Hedef</span></div>
       </section>
@@ -1902,16 +2028,19 @@ function settingsHTML() {
         <div class="s-row nb">
           <div class="info">
             <b>Kayıtlı veri</b>
-            <span>${state.types.length} blok, ${state.history.length} kayıt · yedekleme Google Drive ile yapılır</span>
+            <span>${state.types.length} blok, ${state.history.length} kayıt${state.settings.lastBackup ? ` · son yedek ${whenText(state.settings.lastBackup)}` : ""}</span>
           </div>
         </div>
         <div class="data-actions" style="padding-top:4px">
-          <button class="btn" data-action="exportCSV">${I.download} Geçmişi CSV olarak indir</button>
+          <button class="btn primary" data-action="exportBackup">${I.download} Tam yedek indir</button>
+          <button class="btn" data-action="importBackup">${I.upload} Yedekten geri yükle</button>
+          <!-- <button class="btn" data-action="exportCSV">${I.download} Geçmişi CSV</button> ########### GEÇİCİ OLARAK KAPALI ########### -->
         </div>
+        <p class="sync-note">Tam yedek tüm blokları, geçmişi, ayarları ve silme mezar taşlarını içerir. Cihazlar arasında aktarmak veya Drive dışı saklamak için kullan. Geri yüklerken birleştir veya üzerine yaz seçebilirsin.</p>
         ${
           hasUndo()
             ? `<div class="s-row" style="margin-top:8px">
-                <div class="info"><b>Son işlemi geri al</b><span>Geçmişi temizleme veya sıfırlamadan önceki duruma dön.</span></div>
+                <div class="info"><b>Son işlemi geri al</b><span>İçe aktarma, temizleme veya sıfırlamadan önceki duruma dön.</span></div>
                 <button class="btn small" data-action="undoImport">${I.reset} Geri al</button>
               </div>`
             : ""
@@ -2138,6 +2267,167 @@ function exportCSV() {
     "text/csv;charset=utf-8",
   );
   toast(`${state.history.length} kayıt CSV olarak indirildi`);
+}
+
+/* ---- Tam yedek (JSON) indirme / geri yükleme ----
+   Drive senkronu ile aynı birleştirme kurallarını kullanır.
+   Format, gelecekteki kendi sunucu API'si ile uyumlu tutulur. */
+const BACKUP_FORMAT = "focusblock-backup-v2";
+
+function buildFullBackup() {
+  try {
+    stampChanges();
+  } catch (_) {}
+  return {
+    app: BACKUP_APP,
+    format: BACKUP_FORMAT,
+    version: 2,
+    savedAt: Date.now(),
+    device: (typeof syncMeta !== "undefined" && syncMeta.device) || "local",
+    settings: { ...state.settings },
+    settingsAt: (state.sync && state.sync.settingsAt) || 0,
+    types: state.types,
+    history: state.history,
+    activeTypeId: state.activeTypeId,
+    tomb: (state.sync && state.sync.tomb) || { h: {}, t: {} },
+  };
+}
+
+function exportFullBackup() {
+  const payload = buildFullBackup();
+  const text = JSON.stringify(payload, null, 2);
+  downloadFile(
+    `focusblock-yedek-${stampName()}.json`,
+    text,
+    "application/json;charset=utf-8",
+  );
+  state.settings.lastBackup = Date.now();
+  persist();
+  toast(
+    `Tam yedek indirildi · ${payload.types.length} blok, ${payload.history.length} kayıt`,
+  );
+}
+
+function parseBackupFile(raw) {
+  if (!raw || typeof raw !== "object")
+    throw new Error("Geçersiz yedek dosyası");
+  if (raw.app && raw.app !== BACKUP_APP)
+    throw new Error("Bu dosya FocusBlock yedeği değil");
+  /* Eski senkron dosyası veya yeni yedek formatı kabul edilir */
+  const isSync =
+    raw.format === SYNC_FORMAT || raw.format === "focusblock-sync-v1";
+  const isBackup =
+    raw.format === BACKUP_FORMAT ||
+    raw.format === "focusblock-backup-v1" ||
+    !raw.format;
+  if (!isSync && !isBackup) throw new Error("Yedek formatı tanınamadı");
+  if (!Array.isArray(raw.types) || !Array.isArray(raw.history))
+    throw new Error("Yedekte blok veya geçmiş verisi yok");
+  return raw;
+}
+
+async function importFullBackup() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.style.display = "none";
+  document.body.appendChild(input);
+
+  const file = await new Promise((resolve) => {
+    input.onchange = () => resolve(input.files && input.files[0]);
+    input.click();
+    setTimeout(() => {
+      if (!input.files || !input.files.length) resolve(null);
+    }, 60000);
+  });
+  input.remove();
+  if (!file) return;
+
+  let raw;
+  try {
+    raw = parseBackupFile(JSON.parse(await file.text()));
+  } catch (err) {
+    return toast(err.message || "Yedek dosyası okunamadı");
+  }
+
+  const remoteTypes = Array.isArray(raw.types) ? raw.types.length : 0;
+  const remoteHist = Array.isArray(raw.history) ? raw.history.length : 0;
+
+  const merge = await confirmDialog(
+    "Yedekten geri yükle",
+    `Dosyada ${remoteTypes} blok ve ${remoteHist} geçmiş kaydı var.\n\n• Birleştir (önerilen): mevcut verilerle birleştirir; çakışmada yedekteki kazanır, silinenler mezar taşı ile korunur.\n• Üzerine yazmak için iptal edip tekrar dene (aşağıdaki adımda sorulur).\n\nÇalışan sayaç duraklatılır. Önceki durum Geri al ile dönebilir.`,
+    "Birleştir",
+    false,
+  );
+  if (merge === false) {
+    const overwrite = await confirmDialog(
+      "Üzerine yazılsın mı?",
+      `Mevcut tüm bloklar, geçmiş ve ayarlar yedektekilerle değiştirilecek. Bu işlem geri alınabilir (Geri al).`,
+      "Üzerine yaz",
+      true,
+    );
+    if (!overwrite) return;
+  }
+
+  if (state.session.running) pauseTimer();
+  snapshotForUndo();
+
+  try {
+    if (merge) {
+      const remote = {
+        types: raw.types,
+        history: raw.history,
+        settings: syncSettingsOf(raw.settings || {}),
+        settingsAt: Number(raw.settingsAt) || 0,
+        tomb: normalizeSync({ tomb: raw.tomb, settingsAt: raw.settingsAt })
+          .tomb,
+      };
+      if (raw.settings) {
+        remote.settingsAt = Math.max(
+          remote.settingsAt,
+          (state.sync.settingsAt || 0) + 1,
+        );
+      }
+      mergeRemote(remote);
+      if (raw.activeTypeId && typeById(raw.activeTypeId)) {
+        state.activeTypeId = raw.activeTypeId;
+      }
+    } else {
+      const ns = normalizeState({
+        settings: raw.settings,
+        types: raw.types,
+        history: raw.history,
+        activeTypeId: raw.activeTypeId,
+        session: null,
+        sync: {
+          tomb:
+            raw.tomb && typeof raw.tomb === "object"
+              ? raw.tomb
+              : { h: {}, t: {} },
+          settingsAt: Number(raw.settingsAt) || Date.now(),
+          pristine: false,
+        },
+      });
+      state = ns;
+      state.session.running = false;
+      state.session.endAt = null;
+      track = null;
+    }
+    ui.selectedTypeId = state.activeTypeId;
+    ui.hist.type = "all";
+    persist();
+    scheduleSync();
+    applyAppearance();
+    refreshAll();
+    toast(
+      merge
+        ? "Yedek birleştirildi"
+        : "Yedek yüklendi · önceki durum Geri al ile dönebilirsin",
+    );
+  } catch (err) {
+    console.error(err);
+    toast("Geri yükleme sırasında hata oluştu");
+  }
 }
 
 /* ---- Geri alma (tek seviye) ---- */
@@ -2469,6 +2759,10 @@ document.addEventListener("click", async (e) => {
     }
     case "exportCSV":
       return exportCSV();
+    case "exportBackup":
+      return exportFullBackup();
+    case "importBackup":
+      return importFullBackup();
     case "undoImport":
       return undoImport();
     case "testSound":
@@ -2633,6 +2927,7 @@ const typeSig = (t) =>
     t.sets.map((s) => [s.title, s.work, s.break]),
   ]);
 
+/* Tüm senkronize edilen ayarlar — gelecekteki kendi sunucu adaptörü de aynı şemayı kullanır */
 const syncSettingsOf = (s) => ({
   theme: s.theme,
   accent: s.accent,
@@ -2640,6 +2935,9 @@ const syncSettingsOf = (s) => ({
   autoStart: s.autoStart,
   sound: s.sound,
   volume: s.volume,
+  notify: !!s.notify,
+  vibrate: s.vibrate !== false,
+  wakeLock: !!s.wakeLock,
 });
 const settingsSig = () => JSON.stringify(syncSettingsOf(state.settings));
 

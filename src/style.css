@@ -1375,37 +1375,61 @@ input[type="number"] {
 }
 
 .heat-wrap {
-  display: flex;
-  gap: 8px;
   overflow-x: auto;
   padding-bottom: 6px;
   container-type: inline-size;
 }
-.heat-wrap > * {
-  /* 16 hafta + gün etiketleri kapsayıcı genişliğine sığar */
-  --cs: clamp(9px, calc((100cqw - 46px - 15 * 3px) / 16), 14px);
+.heat-wrap.gh {
+  --cs: clamp(8px, calc((100cqw - 40px) / var(--weeks, 53)), 13px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
-.heat-days {
+.heat-months {
   display: grid;
-  grid-template-rows: repeat(7, var(--cs, 14px));
+  grid-auto-flow: column;
+  grid-auto-columns: var(--cs, 12px);
   gap: 3px;
+  margin-left: 28px; /* heat-days genişliği */
+  height: 14px;
   font-size: 9.5px;
   font-weight: 700;
   color: var(--muted);
-  line-height: var(--cs, 14px);
+  white-space: nowrap;
+}
+.heat-month {
+  overflow: visible;
+  line-height: 14px;
+}
+.heat-body {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.heat-days {
+  display: grid;
+  grid-template-rows: repeat(7, var(--cs, 12px));
+  gap: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted);
+  line-height: var(--cs, 12px);
+  width: 22px;
+  flex: none;
 }
 .heat {
   display: grid;
-  grid-template-rows: repeat(7, var(--cs, 14px));
+  grid-template-rows: repeat(7, var(--cs, 12px));
   grid-auto-flow: column;
-  grid-auto-columns: var(--cs, 14px);
+  grid-auto-columns: var(--cs, 12px);
   gap: 3px;
 }
 .cell {
-  width: var(--cs, 14px);
-  height: var(--cs, 14px);
-  border-radius: 4px;
+  width: var(--cs, 12px);
+  height: var(--cs, 12px);
+  border-radius: 2px;
   background: var(--surface-2);
+  transition: background 0.15s;
 }
 .cell.l1 {
   background: color-mix(in srgb, var(--accent) 28%, transparent);
@@ -1421,6 +1445,10 @@ input[type="number"] {
 }
 .cell.off {
   visibility: hidden;
+}
+.cell[data-action]:hover {
+  outline: 1px solid var(--text);
+  outline-offset: 1px;
 }
 
 .mini-chart {
@@ -2187,6 +2215,9 @@ kbd {
 @container (max-width: 300px) {
   .heat-days {
     display: none;
+  }
+  .heat-months {
+    margin-left: 0;
   }
 }
 
