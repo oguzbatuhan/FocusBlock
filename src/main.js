@@ -2051,7 +2051,7 @@ function contactHTML() {
         
         <div class="s-row" style="margin-top: 8px;">
           <div class="info">
-            <b>E-posta Desteği</b>
+            <b>Geri Bildirim Gönder</b>
             <span>Geri bildirim, destek talebi ve sorularınız için direkt e-posta gönderebilirsiniz.</span>
           </div>
           <a class="btn primary small" href="mailto:cozelioguzbatuhan@gmail.com?subject=${supportSubject}&body=${supportBody}" target="_blank" rel="noopener" style="text-decoration:none">
@@ -2069,15 +2069,6 @@ function contactHTML() {
           </a>
         </div>
 
-        <div class="s-row">
-          <div class="info">
-            <b>GitHub Deposu</b>
-            <span>Proje kodlarını incelemek, kaynak koda katkıda bulunmak veya hata bildirimi (Issue) açmak için.</span>
-          </div>
-          <a class="btn small" href="https://github.com/oguzbatuhan" target="_blank" rel="noopener" style="text-decoration:none">
-            ${I.external} GitHub'da İncele
-          </a>
-        </div>
       </section>
     </div>
   </div>`;
