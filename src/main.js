@@ -19,6 +19,11 @@ import {
   signOutGoogle,
 } from "./services/googleSync.js";
 
+/* Sürüm bilgisi derleme sırasında vite.config.js (define) ile package.json'dan otomatik gelir */
+const APP_VERSION =
+  typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
+const APP_BUILD = typeof __APP_BUILD__ !== "undefined" ? __APP_BUILD__ : "";
+
 const STORAGE_KEY = "focusblock-v2";
 const SYNC_KEY = "focusblock-v2-sync";
 const OLD_KEY = "focusblock-pro-state";
@@ -294,7 +299,7 @@ function defaultState() {
     session: freshSession(types[0]),
     history: [],
     /* Drive eşitlemesi için: silinenler (mezar taşı), ayar zaman damgası, dokunulmamış mı? */
-    sync: { tomb: { h: {}, t: {} }, settingsAt: 0, pristine: true },
+    sync: { tomb: { h: {}, t: {} }, settingsAt: 0, epoch: 0, pristine: true },
   };
 }
 
@@ -304,9 +309,16 @@ const validEnd = (s) =>
     : null;
 
 function normalizeSync(s) {
-  const o = { tomb: { h: {}, t: {} }, settingsAt: 0, pristine: false };
+  const o = {
+    tomb: { h: {}, t: {} },
+    settingsAt: 0,
+    epoch: 0,
+    pristine: false,
+  };
   if (!s || typeof s !== "object") return o;
   o.settingsAt = Number(s.settingsAt) > 0 ? Number(s.settingsAt) : 0;
+  /* epoch: "her şeyi değiştiren" işlemin (sıfırlama, üzerine yazma, geri alma) zamanı */
+  o.epoch = Number(s.epoch) > 0 ? Number(s.epoch) : 0;
   o.pristine = !!s.pristine;
   ["h", "t"].forEach((k) => {
     const src = s.tomb && s.tomb[k];
@@ -949,6 +961,24 @@ function confirmDialog(title, message, okLabel = "Onayla", danger = false) {
       </div>`);
   });
 }
+/* Birden fazla seçenekli diyalog: seçilen değeri, vazgeçilirse false döner */
+function choiceDialog(title, message, choices) {
+  return new Promise((resolve) => {
+    beginModal(resolve);
+    openModal(`
+      <h3>${esc(title)}</h3>
+      <p>${esc(message)}</p>
+      <div class="modal-actions col">
+        ${choices
+          .map(
+            (c) =>
+              `<button class="btn ${c.danger ? "danger" : c.primary ? "primary" : ""}" data-action="modalPick" data-v="${esc(c.value)}">${esc(c.label)}</button>`,
+          )
+          .join("")}
+        <button class="btn" data-action="modalNo">Vazgeç</button>
+      </div>`);
+  });
+}
 function openTemplateModal() {
   beginModal(null);
   openModal(`
@@ -1153,7 +1183,7 @@ function adoptStoredIfNewer() {
       (a.endAt !== se.endAt || a.setIndex !== se.setIndex || a.mode !== se.mode)
     ) {
       state = normalizeState(st);
-      track = null;
+      initSyncTracking();
       if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
       applyAppearance();
       refreshAll();
@@ -1305,10 +1335,13 @@ function renderShellState() {
   if (b) b.style.width = `${clamp((today / goal) * 100, 0, 100)}%`;
   $("app").classList.toggle("is-running", state.session.running);
   syncWakeLock();
+  /* Gizlilik / İletişim alt sayfalarında "Ayarlar" menüsü vurgulu kalsın */
+  const navView =
+    ui.view === "privacy" || ui.view === "contact" ? "settings" : ui.view;
   document
     .querySelectorAll(".nav-btn")
     .forEach((btn) =>
-      btn.classList.toggle("active", btn.dataset.view === ui.view),
+      btn.classList.toggle("active", btn.dataset.view === navView),
     );
 }
 
@@ -1628,7 +1661,7 @@ function historyHTML() {
     <header class="page-head">
       <div><h1>Geçmiş</h1><p>Tamamladığın tüm odak setleri burada kayıtlı.</p></div>
       <div class="head-actions">
-        <button class="btn danger small" data-action="clearHist" ${state.history.length ? "" : "disabled"}>${I.trash} Geçmişi temizle</button>
+       
       </div>
     </header>
 
@@ -1925,11 +1958,11 @@ function statsHTML() {
 
     <div class="kpi-grid">
       <div class="card kpi"><span class="card-title">Toplam odak</span><b>${fmtDur(total)}</b><small>${activeDays} aktif gün</small></div>
-      <div class="card kpi"><span class="card-title">Günlük ortalama</span><b>${fmtDur(total / days)}</b><small>Hedef: ${fmtDur(goal)}</small></div>
+      <div class="card kpi"><span class="card-title">Günlük ortalama</span><b>${fmtDur(total / list.length)}</b><small>Hedef: ${fmtDur(goal)}</small></div>
       <div class="card kpi"><span class="card-title">Tamamlanan set</span><b>${completed}</b><small>${partial} yarım bırakıldı</small></div>
       <div class="card kpi"><span class="card-title">Seri</span><b>🔥 ${currentStreak(mMap)} gün</b><small>En uzun: ${longestStreak(mMap)} gün</small></div>
       <div class="card kpi"><span class="card-title">En verimli gün</span><b>${best.min > 0 ? fmtDur(best.min) : "—"}</b><small>${best.min > 0 ? esc(dayLabel(best.key)) : "Henüz veri yok"}</small></div>
-      <div class="card kpi"><span class="card-title">Hedef tutturma</span><b>${hitDays}/${days}</b><small>gün hedefe ulaşıldı</small></div>
+      <div class="card kpi"><span class="card-title">Hedef tutturma</span><b>${hitDays}/${list.length}</b><small>gün hedefe ulaşıldı</small></div>
     </div>
 
     <div class="stats-grid">
@@ -2112,7 +2145,7 @@ function settingsHTML() {
         <div class="s-row nb" style="padding-top: 8px;">
           <div class="info">
             <b>FocusBlock Pro</b>
-            <span>Sürüm 2.0.0</span>
+            <span>Sürüm ${esc(APP_VERSION)}${APP_BUILD ? ` · ${esc(APP_BUILD)}` : ""}</span>
           </div>
         </div>
 
@@ -2184,7 +2217,8 @@ function contactHTML() {
   const supportBody = encodeURIComponent(
     "Merhaba Oğuz Batuhan,\n\nFocusBlock Pro uygulaması ile ilgili görüş/önerim şu şekildedir:\n\n\n----\nCihaz Bilgisi: " +
       navigator.userAgent +
-      "\nSürüm: 2.0.0",
+      "\nSürüm: " +
+      APP_VERSION,
   );
 
   const donateSubject = encodeURIComponent(
@@ -2385,21 +2419,16 @@ async function importFullBackup() {
   const remoteTypes = Array.isArray(raw.types) ? raw.types.length : 0;
   const remoteHist = Array.isArray(raw.history) ? raw.history.length : 0;
 
-  const merge = await confirmDialog(
+  const choice = await choiceDialog(
     "Yedekten geri yükle",
-    `Dosyada ${remoteTypes} blok ve ${remoteHist} geçmiş kaydı var.\n\n• Birleştir (önerilen): mevcut verilerle birleştirir; çakışmada yedekteki kazanır, silinenler mezar taşı ile korunur.\n• Üzerine yazmak için iptal edip tekrar dene (aşağıdaki adımda sorulur).\n\nÇalışan sayaç duraklatılır. Önceki durum Geri al ile dönebilir.`,
-    "Birleştir",
-    false,
+    `Dosyada ${remoteTypes} blok ve ${remoteHist} geçmiş kaydı var.\n\n• Birleştir (önerilen): mevcut verilerle birleştirir; mevcut hiçbir kayıt silinmez.\n• Üzerine yaz: mevcut tüm bloklar, geçmiş ve ayarlar yedektekilerle değişir${syncMeta.connected ? "; Drive'daki veriler de bununla değiştirilir" : ""}.\n\nÇalışan sayaç duraklatılır. Önceki durum Geri al ile dönebilir.`,
+    [
+      { value: "merge", label: "Birleştir", primary: true },
+      { value: "overwrite", label: "Üzerine yaz", danger: true },
+    ],
   );
-  if (merge === false) {
-    const overwrite = await confirmDialog(
-      "Üzerine yazılsın mı?",
-      `Mevcut tüm bloklar, geçmiş ve ayarlar yedektekilerle değiştirilecek. Bu işlem geri alınabilir (Geri al).`,
-      "Üzerine yaz",
-      true,
-    );
-    if (!overwrite) return;
-  }
+  if (!choice) return;
+  const merge = choice === "merge";
 
   if (state.session.running) pauseTimer();
   snapshotForUndo();
@@ -2411,6 +2440,7 @@ async function importFullBackup() {
         history: raw.history,
         settings: syncSettingsOf(raw.settings || {}),
         settingsAt: Number(raw.settingsAt) || 0,
+        epoch: state.sync.epoch || 0,
         tomb: normalizeSync({ tomb: raw.tomb, settingsAt: raw.settingsAt })
           .tomb,
       };
@@ -2443,7 +2473,7 @@ async function importFullBackup() {
       state = ns;
       state.session.running = false;
       state.session.endAt = null;
-      track = null;
+      commitReplace();
     }
     ui.selectedTypeId = state.activeTypeId;
     ui.hist.type = "all";
@@ -2483,10 +2513,9 @@ function undoImport() {
     state.session.running = false;
     state.session.endAt = null;
     localStorage.removeItem(PREV_KEY);
-    track = null;
     ui.selectedTypeId = state.activeTypeId;
     ui.hist.type = "all";
-    save();
+    commitReplace();
     applyAppearance();
     refreshAll();
     toast("Önceki duruma dönüldü");
@@ -2518,6 +2547,7 @@ document.addEventListener("click", async (e) => {
   }
   if (a === "modalYes") return closeModal(true);
   if (a === "modalNo") return closeModal(false);
+  if (a === "modalPick") return closeModal(d.v);
   if (a === "tpl") {
     const t = makeType(TEMPLATES[parseInt(d.i)]);
     state.types.push(t);
@@ -2616,6 +2646,8 @@ document.addEventListener("click", async (e) => {
       const wasActive = t.id === state.activeTypeId;
       state.types = state.types.filter((x) => x.id !== t.id);
       ui.selectedTypeId = state.types[0].id;
+      if (ui.hist.type !== "all" && !typeById(ui.hist.type))
+        ui.hist.type = "all";
       if (wasActive) {
         state.session.running = false;
         state.activeTypeId = state.types[0].id;
@@ -2800,9 +2832,12 @@ document.addEventListener("click", async (e) => {
     case "testSound":
       return playSound(d.kind, true);
     case "resetAll": {
+      const connected = syncMeta.connected;
       const ok = await confirmDialog(
         "Her şey sıfırlansın mı?",
-        "Bloklar, geçmiş ve ayarlar silinecek. İstersen Ayarlar'dan geri alabilirsin.",
+        connected
+          ? "Bloklar, geçmiş ve ayarlar bu cihazdan ve Google Drive'daki yedekten silinecek; diğer cihazlar da eşitlenince temizlenir. İstersen Ayarlar'dan geri alabilirsin."
+          : "Bloklar, geçmiş ve ayarlar silinecek. İstersen Ayarlar'dan geri alabilirsin.",
         "Sıfırla",
         true,
       );
@@ -2812,12 +2847,16 @@ document.addEventListener("click", async (e) => {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(OLD_KEY);
       state = defaultState();
-      track = null;
       ui.selectedTypeId = state.activeTypeId;
+      ui.hist.type = "all";
+      commitReplace();
       applyAppearance();
-      save();
       refreshAll();
-      return toast("Her şey sıfırlandı");
+      return toast(
+        connected
+          ? "Her şey sıfırlandı · Drive'daki veriler de siliniyor"
+          : "Her şey sıfırlandı",
+      );
     }
   }
 });
@@ -2890,7 +2929,7 @@ window.addEventListener("storage", (e) => {
   if (e.key !== STORAGE_KEY || !e.newValue) return;
   try {
     state = normalizeState(JSON.parse(e.newValue));
-    track = null;
+    initSyncTracking();
     if (!typeById(ui.selectedTypeId)) ui.selectedTypeId = state.activeTypeId;
     applyAppearance();
     refreshAll();
@@ -2946,6 +2985,7 @@ const syncRt = {
   error: "",
   lastSilentFail: 0,
   pendingRefresh: false,
+  overwrote: false, // ilk eşitlemede yerel veri Drive ile değiştirildi mi
 };
 
 /* ---- Değişiklik takibi: düzenleme/silme noktalarına dokunmadan otomatik ---- */
@@ -2982,6 +3022,20 @@ function snapshotTrack() {
 }
 function initSyncTracking() {
   track = snapshotTrack();
+}
+
+/* "Her şeyi değiştiren" işlem (sıfırlama, yedeğin üzerine yazılması, geri alma) sonrası çağrılır:
+   yeni bir dönem başlatır ve Drive'a hemen yazar; diğer cihazlar eşitlenince eski veriyi bırakır. */
+function commitReplace() {
+  const now = Date.now();
+  state.sync.epoch = now;
+  state.sync.settingsAt = now;
+  state.sync.pristine = false;
+  initSyncTracking();
+  persist();
+  scheduleSync();
+  clearTimeout(syncRt.timer);
+  runSync();
 }
 
 function trimTomb(sy) {
@@ -3065,6 +3119,7 @@ function buildSyncPayload() {
     device: syncMeta.device,
     settings: syncSettingsOf(state.settings),
     settingsAt: state.sync.settingsAt || 0,
+    epoch: state.sync.epoch || 0,
     types: state.types,
     history: state.history,
     tomb: state.sync.tomb,
@@ -3095,12 +3150,17 @@ function parseRemote(raw) {
   });
   const types = raw.types.length ? ns.types : [];
   if (types.some((t) => !rawIds.has(t.id))) throw bad();
-  const sy = normalizeSync({ tomb: raw.tomb, settingsAt: raw.settingsAt });
+  const sy = normalizeSync({
+    tomb: raw.tomb,
+    settingsAt: raw.settingsAt,
+    epoch: raw.epoch,
+  });
   return {
     types,
     history: ns.history,
     settings: syncSettingsOf(ns.settings),
     settingsAt: sy.settingsAt,
+    epoch: sy.epoch,
     tomb: sy.tomb,
   };
 }
@@ -3135,8 +3195,19 @@ function syncSig(p) {
       .join(",");
   const s = p.settings;
   return JSON.stringify([
-    [s.theme, s.accent, s.dailyGoal, s.autoStart, s.sound, s.volume],
+    [
+      s.theme,
+      s.accent,
+      s.dailyGoal,
+      s.autoStart,
+      s.sound,
+      s.volume,
+      s.notify,
+      s.vibrate,
+      s.wakeLock,
+    ],
     p.settingsAt || 0,
+    p.epoch || 0,
     p.types.map(T).sort(byId),
     p.history.map(H).sort(byId),
     M(p.tomb.h),
@@ -3167,6 +3238,25 @@ function dedupeLocalTypes(remote) {
 function mergeRemote(remote) {
   const sy = state.sync;
   const firstSync = !syncMeta.lastSync;
+  const remoteEpoch = Number(remote.epoch) || 0;
+  const localEpoch = sy.epoch || 0;
+
+  /* Drive'daki veri, bu cihazın bildiği son "sıfırlama / üzerine yazma" öncesine aitse yok say;
+     yerel durum esas alınır ve Drive'ın üzerine yazılır. */
+  if (remoteEpoch < localEpoch && !firstSync) return;
+
+  /* Drive esastır: ilk bağlanışta (eşitlemeden önce yapılan yerel değişiklikler dahil) ya da başka
+     bir cihaz her şeyi sıfırlayıp üzerine yazdıysa, bu cihazdaki veri bırakılır ve Drive'daki durum
+     aynen alınır. İlk bağlanışta ezilen yerel veri "Geri al" ile döndürülebilsin diye saklanır. */
+  const replace = firstSync || remoteEpoch > localEpoch;
+  if (replace) {
+    if (firstSync && !sy.pristine && remote.types.length) {
+      snapshotForUndo();
+      syncRt.overwrote = true;
+    }
+    sy.tomb = { h: {}, t: {} };
+    sy.epoch = remoteEpoch;
+  }
 
   ["h", "t"].forEach((k) => {
     for (const id in remote.tomb[k])
@@ -3179,7 +3269,7 @@ function mergeRemote(remote) {
 
   let types;
   let history;
-  if (sy.pristine && remote.types.length) {
+  if ((sy.pristine || replace) && remote.types.length) {
     /* Bu cihaz yeni/dokunulmamış: varsayılan blokları bırak, bulutaki veriyi al */
     types = remote.types.slice();
     history = remote.history.slice();
@@ -3216,7 +3306,16 @@ function mergeRemote(remote) {
   state.types = types.length ? types : defaultTypes();
   state.history = history;
 
-  if (remote.settingsAt > (sy.settingsAt || 0)) {
+  /* Bu cihazda ayarlar hiç özelleştirilmediyse (ör. sıfırlamadan sonra yeniden bağlanış),
+     Drive'daki kişiselleştirmeler zaman damgasına bakılmadan alınır. */
+  const localSettingsUntouched =
+    JSON.stringify(syncSettingsOf(state.settings)) ===
+    JSON.stringify(syncSettingsOf(defaultState().settings));
+  if (
+    replace ||
+    remote.settingsAt > (sy.settingsAt || 0) ||
+    (firstSync && localSettingsUntouched && remote.settingsAt > 0)
+  ) {
     Object.assign(state.settings, remote.settings);
     sy.settingsAt = remote.settingsAt;
   }
@@ -3367,13 +3466,18 @@ async function runSync({ interactive = false } = {}) {
 
     if (changedLocal) {
       refreshAfterSync();
-      toast("Drive'daki değişiklikler bu cihaza eklendi");
+      toast(
+        syncRt.overwrote
+          ? "Drive'daki veriler bu cihazdakilerin yerine alındı · Ayarlar'dan geri alabilirsin"
+          : "Drive'daki değişiklikler bu cihaza eklendi",
+      );
     } else if (interactive) {
       toast("Google Drive ile eşitlendi");
     }
   } catch (err) {
     handleSyncError(err, interactive);
   } finally {
+    syncRt.overwrote = false;
     syncRt.busy = false;
     updateSyncUI();
     if (syncRt.queued) {
